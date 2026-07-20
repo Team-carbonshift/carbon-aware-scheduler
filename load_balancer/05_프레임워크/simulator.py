@@ -1,7 +1,7 @@
 """
 탄소 인지 로드밸런서 시뮬레이터 (정리 노트 §1~§8의 프레임워크 구현).
 
-매 슬롯(기본 15분)마다:
+매 슬롯(기본 1시간)마다:
   1. 슬롯 내 제출된 job 수집 (출발지 = jobs.csv의 region)
   2. 탄소강도 M̂ 확보 — 지금은 perfect forecast placeholder (실측값 사용).
      ★ LSTM이 준비되면 CarbonSeries.forecast()만 교체하면 됨.
@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 import pulp
 
-from config import REGIONS, L_NET_MAX_MS, DATA_DIR, distance_matrix
+from config import REGIONS, L_NET_MAX_MS, DATA_DIR
 
 
 # ────────────────────────── 탄소강도 시계열 ──────────────────────────
@@ -62,13 +62,13 @@ class CarbonSeries:
 @dataclass
 class SimConfig:
     alpha: float = 0.5          # 탄소(1) ↔ 레이턴시(0) 가중치
-    slot_s: float = 900.0       # 재최적화 주기
+    slot_s: float = 3600.0      # 재최적화 주기 (라우팅 행렬 1시간마다 갱신)
     headroom: float = 0.8       # 용량 여유 (쏠림 완화, 노트 §8B)
     slack_penalty: float = 1000.0  # 미배정 페널티 (infeasibility 방어)
     capacity: int | None = None    # 리전당 동시 실행 한도. None = 자동 산정
     cap_factor: float = 1.2        # 자동 산정: baseline 최대 동시실행 × factor
     l_net_max: float | None = None  # 네트워크 SLO 상한(ms). None = 제한 없음
-    dist_max_km: float | None = None  # 이동 거리 상한(km, 논문 정책). None = 제한 없음
+    adaptive_alpha: bool = False    # True면 매 슬롯 파레토 무릎점으로 α 자동 선택
     label: str = ""
 
 
@@ -92,18 +92,20 @@ def auto_capacity(jobs: pd.DataFrame, cap_factor: float) -> int:
 # ────────────────────────── 슬롯 배정 (ILP) ──────────────────────────
 def assign_slot(batch: list[dict], m_tilde: np.ndarray, l_tilde: np.ndarray,
                 avail: np.ndarray, cfg: SimConfig,
-                blocked: np.ndarray) -> list[int | None]:
+                blocked: np.ndarray, alpha: float | None = None) -> list[int | None]:
     """슬롯 내 job 배치 배정. 반환: job별 리전 인덱스 (None = 슬랙/드롭).
-    blocked[o][j] = True 면 o발 job은 j로 못 감 (SLO/거리 정책).
+    blocked[o][j] = True 면 o발 job은 j로 못 감 (레이턴시 SLO 정책).
+    alpha 미지정 시 cfg.alpha 사용 (무릎점 탐색이 후보 α를 넘겨줌).
 
     용량이 어떤 리전에서도 묶일 수 없으면(배치 크기 ≤ 모든 가용량) greedy가
     ILP 최적해와 동일하므로 지름길 사용. 그 외엔 PuLP/CBC.
     """
+    a = cfg.alpha if alpha is None else alpha
     n = len(batch)
     cost = np.empty((n, 8))
     for i, job in enumerate(batch):
         o = job["origin_idx"]
-        cost[i] = cfg.alpha * m_tilde + (1 - cfg.alpha) * l_tilde[o]
+        cost[i] = a * m_tilde + (1 - a) * l_tilde[o]
         cost[i][blocked[o]] = np.inf
 
     feasible_any = ~np.isinf(cost)
@@ -133,18 +135,53 @@ def assign_slot(batch: list[dict], m_tilde: np.ndarray, l_tilde: np.ndarray,
     return out
 
 
+# ────────────────────────── 슬롯별 α 자동 선택 (파레토 무릎점) ──────────────────────────
+ALPHA_GRID = np.round(np.arange(0.0, 1.0001, 0.05), 2)
+
+
+def knee_slot_alpha(batch: list[dict], durations: np.ndarray, m_hat: np.ndarray,
+                    m_tilde: np.ndarray, l_tilde: np.ndarray, latency: np.ndarray,
+                    avail: np.ndarray, cfg: SimConfig,
+                    blocked: np.ndarray) -> tuple[float, list[int | None]]:
+    """이 슬롯의 파레토 무릎점 α와 그 배정을 반환.
+
+    α 후보(0~1, 0.05 간격)마다 배정을 구해 (평균 지연, 예상 배출) 점을 찍고,
+    두 축을 0~1 정규화한 뒤 이상점 (0,0)에 가장 가까운 점을 채택 — 평가 가중치
+    w 없이 곡선의 기하학만으로 "급격히 꺾이는 지점"을 고른다.
+    배출 추정 = 예측 강도 × duration × 1kW (실제 정산은 integrate_gco2가 담당).
+    드롭 최소인 후보들 안에서만 고르고, 동률이면 작은 α(지연 우선)."""
+    cand = []
+    for a in ALPHA_GRID:
+        picks = assign_slot(batch, m_tilde, l_tilde, avail, cfg, blocked, alpha=float(a))
+        lats = [latency[j["origin_idx"]][p] for j, p in zip(batch, picks) if p is not None]
+        carb = sum(m_hat[p] * d / 3600.0
+                   for p, d in zip(picks, durations) if p is not None)
+        drops = sum(p is None for p in picks)
+        cand.append((float(a), picks, float(np.mean(lats)) if lats else 0.0, carb, drops))
+
+    min_drop = min(c[4] for c in cand)
+    cand = [c for c in cand if c[4] == min_drop]
+
+    def norm(v: np.ndarray) -> np.ndarray:
+        rng = v.max() - v.min()
+        return (v - v.min()) / rng if rng > 1e-9 else np.zeros_like(v)
+
+    lat_n = norm(np.array([c[2] for c in cand]))
+    carb_n = norm(np.array([c[3] for c in cand]))
+    i = int(np.hypot(lat_n, carb_n).argmin())
+    return cand[i][0], cand[i][1]
+
+
 # ────────────────────────── 시뮬레이션 본체 ──────────────────────────
 def run_sim(jobs: pd.DataFrame, carbon: CarbonSeries, latency: np.ndarray,
             cfg: SimConfig, mode: str = "ilp") -> dict:
     """mode: 'ilp' = 탄소 인지 LB / 'baseline' = 원래 배정 그대로."""
     ridx = {r: i for i, r in enumerate(REGIONS)}
     l_tilde = latency / L_NET_MAX_MS
-    # 이동 불가 경로 마스크 (SLO + 거리 정책). 홈 리전은 항상 허용.
+    # 이동 불가 경로 마스크 (레이턴시 SLO 정책). 홈 리전은 항상 허용.
     blocked = np.zeros((8, 8), dtype=bool)
     if cfg.l_net_max is not None:
         blocked |= latency > cfg.l_net_max
-    if cfg.dist_max_km is not None:
-        blocked |= distance_matrix() > cfg.dist_max_km
     np.fill_diagonal(blocked, False)
     cap = cfg.capacity or auto_capacity(jobs, cfg.cap_factor)
     cap_eff = int(np.floor(cfg.headroom * cap))  # headroom 적용 용량
@@ -168,6 +205,7 @@ def run_sim(jobs: pd.DataFrame, carbon: CarbonSeries, latency: np.ndarray,
             run_count[j] -= 1
 
         batch_df = by_slot.get_group(slot) if slot in by_slot.groups else None
+        a_slot = float("nan")  # 이 슬롯에 적용된 α (배치 없으면 NaN)
 
         if batch_df is not None:
             m_hat = carbon.forecast(t0)           # ★ LSTM 연결 지점
@@ -176,24 +214,34 @@ def run_sim(jobs: pd.DataFrame, carbon: CarbonSeries, latency: np.ndarray,
 
             if mode == "baseline":
                 picks = [ridx[r] for r in batch_df.region]
+                a_slot = cfg.alpha
             else:
                 avail = np.maximum(cap_eff - run_count, 0)
-                picks = assign_slot(batch, m_tilde, l_tilde, avail, cfg, blocked)
+                if cfg.adaptive_alpha:
+                    a_slot, picks = knee_slot_alpha(
+                        batch, batch_df.duration.to_numpy(), m_hat, m_tilde,
+                        l_tilde, latency, avail, cfg, blocked)
+                else:
+                    a_slot = cfg.alpha
+                    picks = assign_slot(batch, m_tilde, l_tilde, avail, cfg, blocked)
 
             for (_, job), pick in zip(batch_df.iterrows(), picks):
                 o = ridx[job.region]
                 if pick is None:
                     ilp_score += cfg.slack_penalty
-                    records.append(dict(job_name=job.job_name, origin=job.region,
+                    records.append(dict(job_name=job.job_name,
+                                        submit_time=float(job.submit_time),
+                                        origin=job.region,
                                         assigned=None, k=int(job.k), duration=job.duration,
                                         latency_ms=np.nan, carbon_g=0.0, dropped=True))
                     continue
-                ilp_score += cfg.alpha * m_tilde[pick] + (1 - cfg.alpha) * l_tilde[o][pick]
+                ilp_score += a_slot * m_tilde[pick] + (1 - a_slot) * l_tilde[o][pick]
                 start, end = float(job.submit_time), float(job.submit_time + job.duration)
                 heapq.heappush(running, (end, pick))
                 run_count[pick] += 1
                 records.append(dict(
-                    job_name=job.job_name, origin=job.region, assigned=REGIONS[pick],
+                    job_name=job.job_name, submit_time=start,
+                    origin=job.region, assigned=REGIONS[pick],
                     k=int(job.k), duration=float(job.duration),
                     latency_ms=float(latency[o][pick]),
                     carbon_g=carbon.integrate_gco2(REGIONS[pick], start, end),
@@ -202,7 +250,7 @@ def run_sim(jobs: pd.DataFrame, carbon: CarbonSeries, latency: np.ndarray,
 
         # 슬롯 스냅샷: 리전별 실행 수 × 탄소강도 → 배출률 (시각화용 근사)
         ci_now = np.array([carbon.at(r, t0) for r in REGIONS])
-        slot_series.append(dict(time_s=t0,
+        slot_series.append(dict(time_s=t0, alpha=a_slot,
                                 emission_g_per_h=float((run_count * ci_now).sum()),
                                 **{f"run_{r}": int(c) for r, c in zip(REGIONS, run_count)}))
 
@@ -211,8 +259,13 @@ def run_sim(jobs: pd.DataFrame, carbon: CarbonSeries, latency: np.ndarray,
     routing = pd.crosstab(ok.origin, ok.assigned).reindex(
         index=REGIONS, columns=REGIONS, fill_value=0)
 
+    slot_alpha = [s["alpha"] for s in slot_series]
     metrics = dict(
-        mode=mode, alpha=cfg.alpha, capacity=cap, headroom=cfg.headroom,
+        mode=mode,
+        alpha=(round(float(np.nanmean(slot_alpha)), 3) if cfg.adaptive_alpha
+               else cfg.alpha),  # auto 모드는 슬롯 α 평균 (참고용)
+        alpha_mode="auto" if cfg.adaptive_alpha else "fixed",
+        capacity=cap, headroom=cfg.headroom,
         ilp_score=round(ilp_score, 1),
         total_carbon_kg=round(float(ok.carbon_g.sum()) / 1000.0, 2),
         avg_latency_ms=round(float(ok.latency_ms.mean()), 2),

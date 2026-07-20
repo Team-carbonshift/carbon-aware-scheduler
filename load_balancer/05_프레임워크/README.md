@@ -4,12 +4,20 @@
 구현한 프레임워크. 아직 실제 탄소강도 데이터가 없어 **합성 데이터로 동작**하며,
 실데이터가 오면 CSV 한 장만 교체하면 된다.
 
-## 실행법
+## 실행법 (처음 클론했을 때)
 
 ```bash
-cd 05_프레임워크
-.venv/bin/python run_experiments.py      # baseline + α 스윕 (약 30초)
-.venv/bin/streamlit run app.py           # 웹 대시보드 (브라우저 자동 오픈)
+cd load_balancer/05_프레임워크
+python3 -m venv .venv                    # 1) 가상환경 (최초 1회)
+.venv/bin/pip install -r requirements.txt
+.venv/bin/streamlit run app.py           # 2) 웹 대시보드 (브라우저 자동 오픈)
+```
+
+`results/`가 저장소에 포함되어 있어 **대시보드는 바로 뜬다.**
+실험을 직접 다시 돌리고 싶을 때만:
+
+```bash
+.venv/bin/python run_experiments.py      # baseline + α 스윕(13개) + α=auto (~2분)
 ```
 
 ## 파일 구조
@@ -52,9 +60,8 @@ time_s, US_West, US_Central, US_East, France, Germany, Korea, India, Japan
 
 - 목적함수 `min Σ (α·M̃ + (1−α)·l̃)·x`, 매 슬롯 max 정규화
 - 용량 headroom 0.8 (쏠림 완화) + slack 페널티 1000 (infeasibility 방어)
-- 15분 재최적화 주기 (MPC receding horizon의 골격)
+- 1시간 재최적화 주기 — 라우팅 행렬을 1시간마다 갱신 (MPC receding horizon의 골격)
 - 레이턴시는 Azure 공식 baseline 고정 (244ms 정규화)
-- **이동 거리 정책** (선행 연구의 이동 제한 규칙, 쏠림 방어의 주 수단):
-  제한 없음 / 2500km(대륙 내) / 1200km(프랑스↔독일·한국↔일본만) 3종 비교.
-  리전 좌표 기반 대권거리 (`config.distance_matrix`), `SimConfig.dist_max_km`.
+- 네트워크 지연 SLO 상한(`SimConfig.l_net_max`)은 옵션으로 남아 있으나 기본 실험에선
+  미사용 (지연 억제는 α=auto의 무릎점 선택이 담당).
   용량은 근거 있는 실측값이 없으므로 느슨한 안전망(baseline 피크×1.2)으로만 사용.

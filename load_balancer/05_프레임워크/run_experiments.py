@@ -1,10 +1,9 @@
 """
-실험 일괄 실행: baseline + (거리 정책 3종 × α 스윕 {0, 0.25, 0.5, 0.75, 1.0})
-
-거리 정책 (논문의 이동 거리 제한 규칙):
-  제한 없음 / 2500km (대륙 내) / 1200km (인접국만: 프랑스↔독일, 한국↔일본)
+실험 일괄 실행: baseline + α 스윕 (0.1 간격 + 0.25/0.75)
++ α=auto (매 슬롯 파레토 무릎점으로 α 자동 선택)
 
 결과 → results/summary.json + results/assign_<run>.csv
+     + ../06_라우팅결과/jobs_routed_<α>.csv (스케줄러 인계용)
 사용법: .venv/bin/python run_experiments.py
 """
 import json
@@ -12,12 +11,14 @@ import time
 
 import pandas as pd
 
-from config import JOBS_CSV, RESULTS_DIR, DATA_DIR, load_latency_matrix
+from config import BASE_DIR, JOBS_CSV, RESULTS_DIR, DATA_DIR, load_latency_matrix
 from gen_carbon import generate as gen_carbon_df
 from simulator import CarbonSeries, SimConfig, run_sim
 
-ALPHAS = [0.0, 0.25, 0.5, 0.75, 1.0]
-DIST_POLICIES = [(None, ""), (2500.0, "_d2500"), (1200.0, "_d1200")]
+ALPHAS = [0.0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0]
+
+# 스케줄러 인계용 최종 산출물: jobs.csv 원본 8열 + alpha + assigned_region
+ROUTED_DIR = BASE_DIR.parent / "06_라우팅결과"
 
 
 def main():
@@ -32,18 +33,32 @@ def main():
     latency = load_latency_matrix()
 
     runs = [("baseline", SimConfig(alpha=0.0, label="baseline"), "baseline")]
-    for dist, suffix in DIST_POLICIES:
-        runs += [(f"alpha_{a:g}{suffix}",
-                  SimConfig(alpha=a, dist_max_km=dist, label=f"α={a:g}{suffix}"), "ilp")
-                 for a in ALPHAS]
+    runs += [(f"alpha_{a:g}", SimConfig(alpha=a, label=f"α={a:g}"), "ilp")
+             for a in ALPHAS]
+    # 슬롯별 파레토 무릎점 α 자동 선택 (평가 가중치 w 불사용)
+    runs += [("alpha_auto", SimConfig(adaptive_alpha=True, label="α=auto"), "ilp")]
 
     summary = {}
+
+    def export_routed(name, cfg, out):
+        """jobs_routed_<α>.csv — jobs.csv 스키마 그대로 + alpha, assigned_region."""
+        a, ss = out["assignments"], out["slot_series"]
+        alpha_by_slot = {int(t // cfg.slot_s): al
+                         for t, al in zip(ss.time_s, ss.alpha) if pd.notna(al)}
+        routed = jobs.set_index("job_name").loc[a.job_name].reset_index()
+        routed["alpha"] = (a.submit_time // cfg.slot_s).astype(int).map(alpha_by_slot).values
+        routed["assigned_region"] = a.assigned.values
+        label = name.replace("alpha_", "")
+        routed.to_csv(ROUTED_DIR / f"jobs_routed_{label}.csv", index=False)
 
     def run_one(name, cfg, mode):
         t0 = time.time()
         out = run_sim(jobs, carbon, latency, cfg, mode=mode)
         out["assignments"].to_csv(RESULTS_DIR / f"assign_{name}.csv", index=False)
         out["slot_series"].to_csv(RESULTS_DIR / f"slots_{name}.csv", index=False)
+        if mode == "ilp":
+            ROUTED_DIR.mkdir(exist_ok=True)
+            export_routed(name, cfg, out)
         summary[name] = dict(metrics=out["metrics"], routing_matrix=out["routing_matrix"])
         m = out["metrics"]
         print(f"{name:>10}: 탄소 {m['total_carbon_kg']:>8.1f} kg | "
@@ -52,24 +67,6 @@ def main():
 
     for name, cfg, mode in runs:
         run_one(name, cfg, mode)
-
-    # α 미세 탐색 결과(fine_alpha.csv)가 있으면 정책별 최적 α run도 정식 포함
-    # → 대시보드의 α 선택지·표·파레토에 등장 (w=0.5, 전역 고정 앵커 기준)
-    fine_path = RESULTS_DIR / "fine_alpha.csv"
-    if fine_path.exists():
-        fine = pd.read_csv(fine_path)
-        max_c = summary["baseline"]["metrics"]["total_carbon_kg"]
-        max_l = max(v["metrics"]["avg_latency_ms"] for v in summary.values())
-        for pol_key, (dist, suffix) in zip(["none", "d2500", "d1200"], DIST_POLICIES):
-            f = fine[fine.policy == pol_key]
-            if f.empty:
-                continue
-            sc = 0.5 * (1 - f.total_carbon_kg / max_c) + 0.5 * (1 - f.avg_latency_ms / max_l)
-            a = float(f.alpha.iloc[sc.values.argmax()])
-            name = f"alpha_{a:g}{suffix}"
-            if name not in summary:
-                print(f"[미세 탐색 최적 α 추가] {name}")
-                run_one(name, SimConfig(alpha=a, dist_max_km=dist, label=f"α={a:g}{suffix}"), "ilp")
 
     (RESULTS_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"\n저장: {RESULTS_DIR}/summary.json")

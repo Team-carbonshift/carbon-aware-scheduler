@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config import (BASE_DIR, DATA_DIR, RESULTS_DIR, JOBS_CSV, REGIONS,
-                    L_NET_MAX_MS, load_latency_matrix)
+                    L_NET_MAX_MS, UTC_OFFSET, load_latency_matrix)
 
 st.set_page_config(page_title="탄소 인지 로드밸런서", page_icon="🌍", layout="wide")
 
@@ -49,11 +49,23 @@ def load_all(mtime: float):
     latency = load_latency_matrix()
     slots = {name: pd.read_csv(RESULTS_DIR / f"slots_{name}.csv")
              for name in summary}
-    return summary, carbon, jobs, latency, slots
+    # 시간별 라우팅 뷰용: job별 배정 + 제출 시각 (구버전 CSV엔 submit_time이
+    # 없으므로 jobs.csv와 조인해 항상 확보)
+    assigns = {}
+    for name in summary:
+        a = pd.read_csv(RESULTS_DIR / f"assign_{name}.csv")
+        if "submit_time" not in a.columns:
+            a = a.merge(jobs[["job_name", "submit_time"]], on="job_name")
+        assigns[name] = a
+    return summary, carbon, jobs, latency, slots, assigns
 
 
-def hours(series_s):
-    return series_s / 3600.0
+T0 = pd.Timestamp("2026-01-01")  # t=0 (README_jobs 규약, UTC)
+
+
+def ts(series_s):
+    """초 단위 시각 → 실제 날짜시각 (1년치로 늘어나도 그대로 동작)."""
+    return T0 + pd.to_timedelta(series_s, unit="s")
 
 
 # ── 사이드바 ─────────────────────────────────────────────
@@ -79,23 +91,23 @@ if not (RESULTS_DIR / "summary.json").exists():
     st.warning("결과가 없습니다. 먼저 `python run_experiments.py`를 실행하세요.")
     st.stop()
 
-summary, carbon, jobs, latency, slots = load_all(
+summary, carbon, jobs, latency, slots, assigns = load_all(
     (RESULTS_DIR / "summary.json").stat().st_mtime)
 BASE_M = summary["baseline"]["metrics"]
 
-# 이동 거리 정책 (논문의 데이터 이동 제한 규칙) — 모든 탭에 공통 적용
-POLICIES = {"제한 없음": "", "2500km (대륙 내)": "_d2500", "1200km (인접국만, 논문 규칙)": "_d1200"}
-pol_name = st.radio("🚚 이동 거리 정책", list(POLICIES), horizontal=True,
-                    help="job을 출발 리전에서 얼마나 먼 리전까지 보낼 수 있는지. "
-                         "1200km이면 프랑스↔독일, 한국↔일본만 허용 (선행 연구의 이동 제한 규칙).")
-SUFFIX = POLICIES[pol_name]
-ALPHA_RUNS = sorted([k for k in summary if k.startswith("alpha_")
-                     and (k.endswith(SUFFIX) if SUFFIX else "_d" not in k)],
-                    key=lambda k: float(k.split("_")[1]))
+def _alpha_key(run_name):
+    """정렬 키: 숫자 α 오름차순, auto는 맨 뒤."""
+    part = run_name.split("_")[1]
+    return 1.5 if part == "auto" else float(part)
+
+
+ALPHA_RUNS = sorted([k for k in summary if k.startswith("alpha_") and "_l" not in k],
+                    key=_alpha_key)
+AUTO = next((k for k in ALPHA_RUNS if k.split("_")[1] == "auto"), None)
+AM = summary[AUTO]["metrics"] if AUTO else None
 if not ALPHA_RUNS:
-    st.warning(f"'{pol_name}' 정책의 결과가 없습니다. 결과 파일이 예전 버전인 것 같아요 — "
-               "사이드바의 **🔄 실험 다시 실행**을 누르거나 터미널에서 "
-               "`python run_experiments.py`를 실행해 주세요.")
+    st.warning("결과 파일이 예전 버전인 것 같아요 — 사이드바의 **🔄 실험 다시 실행**을 "
+               "누르거나 터미널에서 `python run_experiments.py`를 실행해 주세요.")
     st.stop()
 
 tab1, tab2, tab3 = st.tabs(["① 입력 데이터", "② 전 / 후 비교", "③ α 스윕 · 모드 비교"])
@@ -107,11 +119,11 @@ with tab1:
     fig = go.Figure()
     for r in REGIONS:
         fig.add_trace(go.Scatter(
-            x=hours(carbon.time_s), y=carbon[r], name=r, mode="lines",
+            x=ts(carbon.time_s), y=carbon[r], name=r, mode="lines",
             line=dict(color=REGION_COLORS[r], width=2),
-            hovertemplate=f"{r}: %{{y:.0f}} g/kWh<br>t=%{{x:.1f}}h<extra></extra>"))
+            hovertemplate=f"{r}: %{{y:.0f}} g/kWh<br>%{{x|%m-%d %H시}}<extra></extra>"))
     fig.update_layout(**LAYOUT, height=420, legend=dict(orientation="h", y=1.12),
-                      xaxis_title="경과 시간 (h, UTC)", yaxis_title="gCO₂/kWh")
+                      xaxis_title="시각 (UTC)", yaxis_title="gCO₂/kWh")
     st.plotly_chart(fig, width="stretch")
 
     c1, c2 = st.columns(2)
@@ -124,17 +136,19 @@ with tab1:
         fig.update_layout(**LAYOUT, height=420, yaxis_autorange="reversed")
         st.plotly_chart(fig, width="stretch")
     with c2:
-        st.subheader("job 제출 분포 (리전 × 현지 시각)")
-        pivot = (jobs.assign(h=jobs.submit_local_hour.astype(int))
+        st.subheader("job 제출 분포 (리전 × UTC 시각)")
+        pivot = (jobs.assign(h=((jobs.submit_time // 3600) % 24).astype(int))
                  .groupby(["region", "h"]).size().unstack(fill_value=0)
-                 .reindex(REGIONS))
+                 .reindex(index=REGIONS, columns=range(24), fill_value=0))
         fig = go.Figure(go.Heatmap(
             z=pivot.values, x=list(range(24)), y=REGIONS, colorscale=BLUE_SEQ,
-            hovertemplate="%{y} · %{x}시: %{z}개<extra></extra>",
+            hovertemplate="%{y} · UTC %{x}시: %{z}개<extra></extra>",
             colorbar=dict(title="개")))
         fig.update_layout(**LAYOUT, height=420, yaxis_autorange="reversed",
-                          xaxis_title="현지 시각")
+                          xaxis_title="UTC 시각")
         st.plotly_chart(fig, width="stretch")
+        st.caption("UTC 기준이라 리전별 봉우리가 시차만큼 어긋나 보입니다 "
+                   "(각 리전의 현지 낮이 서로 다른 UTC 시간대에 위치).")
 
     with st.expander("jobs.csv 미리보기 / 통계"):
         st.dataframe(jobs.head(50), width="stretch")
@@ -144,7 +158,9 @@ with tab1:
 # ═════════════════════ ② 전 / 후 비교 ═════════════════════
 with tab2:
     alpha_pick = st.radio("α 선택 (0 = 레이턴시 중심 ←→ 1 = 탄소 중심)",
-                          ALPHA_RUNS, index=2, horizontal=True,
+                          ALPHA_RUNS,
+                          index=ALPHA_RUNS.index(AUTO) if AUTO else 0,
+                          horizontal=True,
                           format_func=lambda k: f"α = {k.split('_')[1]}")
     M = summary[alpha_pick]["metrics"]
 
@@ -165,14 +181,14 @@ with tab2:
         st.subheader("시간대별 배출률 — 전(baseline) vs 후")
         sb, sa = slots["baseline"], slots[alpha_pick]
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=hours(sb.time_s), y=sb.emission_g_per_h / 1000,
+        fig.add_trace(go.Scatter(x=ts(sb.time_s), y=sb.emission_g_per_h / 1000,
                                  name="baseline (전)", mode="lines",
                                  line=dict(color=BASELINE_GRAY, width=2)))
-        fig.add_trace(go.Scatter(x=hours(sa.time_s), y=sa.emission_g_per_h / 1000,
+        fig.add_trace(go.Scatter(x=ts(sa.time_s), y=sa.emission_g_per_h / 1000,
                                  name=f"탄소 인지 LB (후)", mode="lines",
                                  line=dict(color=ACCENT, width=2)))
         fig.update_layout(**LAYOUT, height=380, legend=dict(orientation="h", y=1.12),
-                          xaxis_title="경과 시간 (h)", yaxis_title="배출률 (kg CO₂/h)")
+                          xaxis_title="시각 (UTC)", yaxis_title="배출률 (kg CO₂/h)")
         st.plotly_chart(fig, width="stretch")
     with c2:
         st.subheader("라우팅 행렬 (출발 → 처리)")
@@ -185,125 +201,232 @@ with tab2:
         st.plotly_chart(fig, width="stretch")
         st.caption("baseline은 대각선 100%. 대각선 밖 = 탄소를 위해 이동한 job.")
 
-    st.subheader("리전별 처리 job 수 — 전 vs 후")
+    st.subheader("누적 탄소 배출 — 실시간 관점")
+    st.caption("매 시각의 결정이 쌓여 벌어지는 격차. 시간을 되감지 않고 읽을 수 있는, "
+               "실시간 운영 그대로의 그림입니다.")
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=REGIONS, y=[BASE_M["region_load"][r] for r in REGIONS],
-                         name="baseline (전)", marker_color=BASELINE_GRAY))
-    fig.add_trace(go.Bar(x=REGIONS, y=[M["region_load"][r] for r in REGIONS],
+    cum_runs = [("baseline", "baseline (전)", BASELINE_GRAY, "solid"),
+                (alpha_pick, f"탄소 인지 LB (후)", ACCENT, "solid")]
+    if AUTO and alpha_pick != AUTO:
+        cum_runs.append((AUTO, "α=auto 참고", INK, "dot"))
+    for name, label, color, dash in cum_runs:
+        # job별 실측 배출(carbon_g)을 제출 시각 기준으로 누적 — 총량이 metrics와 일치
+        a = assigns[name].sort_values("submit_time")
+        fig.add_trace(go.Scatter(x=ts(a.submit_time), y=a.carbon_g.cumsum() / 1000.0,
+                                 name=label, mode="lines",
+                                 line=dict(color=color, width=2, dash=dash)))
+    fig.update_layout(**LAYOUT, height=360, legend=dict(orientation="h", y=1.12),
+                      xaxis_title="시각 (UTC)", yaxis_title="누적 배출 (kg CO₂)")
+    st.plotly_chart(fig, width="stretch")
+
+    asel = assigns[alpha_pick].copy()
+    asel["h"] = (asel.submit_time // 3600).astype(int)  # 슬롯 번호 (경과 h)
+    asel["dt"] = ts(asel.submit_time)                   # 실제 날짜시각 (UTC)
+    asel["dow"] = asel.dt.dt.dayofweek                  # 0=월 … 6=일
+    asel["hod"] = asel.dt.dt.hour                       # UTC 시각 (0~23)
+
+    if M.get("alpha_mode") == "auto":
+        st.subheader("슬롯별 자동 선택 α (파레토 무릎점)")
+        sa_df = slots[alpha_pick]
+        aa = sa_df[sa_df.alpha.notna()]
+        fig = go.Figure(go.Scatter(
+            x=ts(aa.time_s), y=aa.alpha, mode="lines+markers",
+            line=dict(color=ACCENT, width=2), marker=dict(size=5, color=ACCENT),
+            hovertemplate="%{x|%m-%d %H시}: α=%{y:.2f}<extra></extra>"))
+        fig.update_layout(**LAYOUT, height=280, xaxis_title="시각 (UTC)",
+                          yaxis_title="α", yaxis_range=[-0.05, 1.05])
+        st.plotly_chart(fig, width="stretch")
+        st.caption(f"매 슬롯(1시간) α 후보 21개(0~1, 0.05 간격)의 (평균 지연, 예상 배출) "
+                   f"파레토 곡선에서 무릎점을 자동 선택. 평균 α = {M['alpha']:.2f}. "
+                   "평가 가중치 w 없이 곡선의 기하학만 사용합니다.")
+
+        with st.expander("Q. auto의 α는 어떤 원리로 계산되나요?"):
+            st.markdown(
+                "매 1시간 슬롯마다 다음 4단계를 반복합니다:\n\n"
+                "1. **재료 수집** — 그 시간에 제출된 job들 + 리전별 탄소강도. "
+                "탄소강도는 지금은 슬롯 시작 시점의 **실측값**을 그대로 사용합니다 "
+                "(perfect forecast placeholder — LSTM이 준비되면 '과거 24시간 → 다음 "
+                "1시간 예측'으로 이 부분만 교체. 즉 현재 성적은 예측 오차 0 가정의 상한선).\n"
+                "2. **후보 곡선 그리기** — α 후보 21개(0, 0.05, …, 1)마다 ILP 배정을 "
+                "각각 계산해 (평균 지연, 예상 배출) 점 21개를 찍음. 이게 '이 시간의 "
+                "지연↔탄소 교환 곡선'.\n"
+                "3. **무릎점 선택** — 두 축을 각각 0~1로 정규화(단위 맞추기용, 가중치 "
+                "아님)한 뒤, 이상점 (0,0)에서 **유클리드 거리 √(x²+y²)가 최소**인 점을 "
+                "채택: α\\* = argmin √(x_α² + y_α²). 곡선이 '급격한 개선 → 미미한 개선'으로 "
+                "꺾이는 코너가 수학적으로 이 지점입니다 (다목적 최적화의 이상점 최소 "
+                "거리법).\n"
+                "4. **적용** — 그 α의 배정을 확정하고, 다음 슬롯에서 1번부터 다시.\n\n"
+                "부가 규칙: 드롭이 최소인 후보들 안에서만 선택, 거리 동률이면 작은 α"
+                "(지연 우선).")
+
+        with st.expander("Q. 왜 α가 왔다갔다 하나요? — 0인 슬롯도, 1에 가까운 슬롯도 있음"):
+            st.markdown(
+                "α는 미리 정해두는 튜닝 값이 아니라 **매 시간 새로 내리는 결정의 결과**입니다. "
+                "매 슬롯 \"지금 job을 옮기면 지연 1ms당 탄소를 얼마나 살 수 있나\"라는 "
+                "**교환 비율**이 달라지고, 무릎점은 그 비율이 급락하는 지점이라 시간마다 "
+                "다르게 나오는 게 정상입니다.\n\n"
+                "**α가 1에 가까운 시간** — \"지금 옮기면 많이 벌린다\":\n"
+                "- 리전 간 탄소 격차가 큼 (예: 프랑스는 새벽 원자력 잉여로 ~50 g/kWh, "
+                "인도는 ~700 g/kWh)\n"
+                "- 깨끗한 리전에 용량 여유가 있음\n"
+                "- 배치에 옮길 가치가 큰 job(장기 실행)이 포함됨\n\n"
+                "**α = 0인 시간** — \"이번 시간은 옮길 이유가 없다\":\n"
+                "- 리전 간 격차가 작아 옮겨도 얻는 게 거의 없음\n"
+                "- 배치의 job들이 이미 깨끗한 리전에서 출발\n"
+                "- 깨끗한 리전 용량이 앞 슬롯의 장기 job들로 이미 차 있음\n"
+                "- 배치가 작아 선택지가 '안 옮김 vs 대륙 간 대량 이동' 둘뿐(계단형 곡선) "
+                "→ 중간 거래가 없어 보수적으로 '안 옮김'을 택함\n\n"
+                "즉 이 진동은 노이즈가 아니라 **탄소강도 지형의 시간 변화를 따라가는 "
+                "신호**입니다. 고정 α는 이 차이를 무시하고 매시간 같은 강도로 밀어붙이기 "
+                "때문에, 격차가 없는 시간에 지연만 낭비합니다 — auto가 파레토 곡선 위쪽(★)에 "
+                "있는 이유가 바로 이것입니다.")
+
+    st.subheader("리전별 처리 job 수 — 전 vs 후")
+    fc1, fc2 = st.columns([2.6, 1.4])
+    sel_months = fc1.segmented_control("월 (중복 선택)", list(range(1, 13)),
+                                       selection_mode="multi",
+                                       format_func=lambda m: f"{m}월")
+    h_lo, h_hi = fc2.slider("시간대 (UTC)", 0, 24, (0, 24))
+    sel_origin = st.segmented_control("출발 리전 (중복 선택)", REGIONS,
+                                      selection_mode="multi")
+    if sel_origin and len(sel_origin) == 1:
+        off = UTC_OFFSET[sel_origin[0]]
+        st.caption(f"💡 {sel_origin[0]} 현지 시각 = UTC{off:+g}h → 현지 낮(8~20시) ≈ "
+                   f"UTC {(8 - off) % 24:g}~{(20 - off) % 24:g}시. "
+                   "시간대 슬라이더로 이 구간을 잡으면 '그 리전의 낮'을 보는 셈입니다.")
+
+    with st.expander("🕐 UTC ↔ 리전 현지 시각 대조표 — 슬라이더 선택 구간이 각 리전의 몇 시인지"):
+        st.caption("모든 그래프·필터의 축은 UTC 하나로 통일되어 있고, "
+                   "이 표가 리전별 현지 시각으로 번역해 줍니다.")
+        conv = pd.DataFrame([{
+            "리전": r,
+            "UTC 오프셋": f"UTC{UTC_OFFSET[r]:+g}",
+            f"선택 구간 (UTC {h_lo}~{h_hi}시)의 현지 시각":
+                f"{(h_lo + UTC_OFFSET[r]) % 24:g}시 ~ {(h_hi + UTC_OFFSET[r]) % 24:g}시",
+            "현지 낮 (8~20시) ≈ UTC":
+                f"{(8 - UTC_OFFSET[r]) % 24:g}~{(20 - UTC_OFFSET[r]) % 24:g}시",
+        } for r in REGIONS])
+        st.dataframe(conv, width="stretch", hide_index=True)
+
+    filt = asel[(asel.hod >= h_lo) & (asel.hod < h_hi)]
+    if sel_months:
+        filt = filt[filt.dt.dt.month.isin(sel_months)]
+    if sel_origin:
+        filt = filt[filt.origin.isin(sel_origin)]
+
+    if filt.empty:
+        st.info(f"필터 조건에 맞는 job이 없습니다. 현재 데이터 범위: "
+                f"{asel.dt.min():%Y-%m-%d} ~ {asel.dt.max():%Y-%m-%d} — "
+                "월 필터는 1년치 데이터에서 의미가 생깁니다.")
+    else:
+        # 선택 구간 요약 지표 (탄소는 같은 job들의 baseline 배출과 비교)
+        ok = filt[~filt.dropped]
+        bmap = assigns["baseline"].set_index("job_name").carbon_g
+        base_kg = filt.job_name.map(bmap).sum() / 1000.0
+        after_kg = filt.carbon_g.sum() / 1000.0
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("선택 구간 job", f"{len(filt):,}개")
+        mc2.metric("탄소 (후)", f"{after_kg:,.1f} kg",
+                   f"{(after_kg / base_kg - 1) * 100:+.1f}% vs baseline"
+                   if base_kg > 0 else None, delta_color="inverse")
+        mc3.metric("평균 지연 (후)", f"{ok.latency_ms.mean():.1f} ms" if len(ok) else "—")
+        mc4.metric("이동 job", f"{int((ok.origin != ok.assigned).sum()):,}개")
+
+        hod_cnt = filt.groupby("hod").size().reindex(range(24), fill_value=0)
+        fig = go.Figure(go.Bar(x=list(range(24)), y=hod_cnt.values,
+                               marker_color=ACCENT,
+                               hovertemplate="UTC %{x}시: %{y}개<extra></extra>"))
+        fig.update_layout(**LAYOUT, height=180,
+                          xaxis_title="선택 구간의 시간대(UTC) 분포", yaxis_title="job 수")
+        st.plotly_chart(fig, width="stretch")
+
+    before = filt.origin.value_counts().reindex(REGIONS, fill_value=0)
+    after = filt[~filt.dropped].assigned.value_counts().reindex(REGIONS, fill_value=0)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=REGIONS, y=before.values,
+                         name="baseline (전 = 출발 리전)", marker_color=BASELINE_GRAY))
+    fig.add_trace(go.Bar(x=REGIONS, y=after.values,
                          name="탄소 인지 LB (후)", marker_color=ACCENT))
     fig.update_layout(**LAYOUT, height=340, barmode="group", bargap=0.25,
                       legend=dict(orientation="h", y=1.15), yaxis_title="처리 job 수")
     st.plotly_chart(fig, width="stretch")
-    st.caption("탄소강도가 낮은 리전(France 등)으로 부하가 이동하는 정도가 α에 따라 달라집니다. "
-               "용량 headroom(0.8)이 쏠림을 제한합니다.")
+    st.caption(f"필터 적용: {len(filt):,}개 / 전체 {len(asel):,}개 "
+               "(버튼 미선택 = 전체 · 다시 누르면 해제). 시간 필터는 전부 UTC 기준. "
+               "탄소강도가 낮은 리전으로 부하가 이동하는 정도가 α에 따라 달라집니다.")
+
+    st.subheader("job별 배정 내역 — jobs.csv + 그 시각의 α + 배정 리전")
+    st.caption("행 = job 하나: 언제 제출됐고, 그 슬롯의 α가 얼마였고, 그래서 어디로 "
+               "배정됐는지. 위 필터가 그대로 적용됩니다.")
+    alpha_by_h = {}
+    if "alpha" in slots[alpha_pick].columns:
+        sa_df = slots[alpha_pick]
+        alpha_by_h = {int(t // 3600): a for t, a in
+                      zip(sa_df.time_s, sa_df.alpha) if pd.notna(a)}
+    # jobs.csv 원본 열 그대로 + 뒤에 α·배정 나라 2열만 추가
+    view = filt.sort_values("submit_time")
+    tbl = jobs.set_index("job_name").loc[view.job_name].reset_index()
+    tbl["α"] = view.h.map(alpha_by_h).values
+    tbl["배정"] = view.assigned.fillna("(드롭)").values
+    SHOW_MAX = 5000  # 1년치(수십만 행)여도 화면은 가볍게, 전체는 CSV로
+    if len(tbl) > SHOW_MAX:
+        st.info(f"{len(tbl):,}행 중 앞 {SHOW_MAX:,}행만 표시합니다. "
+                "전체는 아래 CSV로 받아 Excel에서 보세요.")
+    st.dataframe(tbl.head(SHOW_MAX), width="stretch", hide_index=True, height=420)
+    st.download_button(f"⬇️ 전체 {len(tbl):,}행 CSV 다운로드 (Excel 호환)",
+                       tbl.to_csv(index=False).encode("utf-8-sig"),
+                       f"jobs_routed_{alpha_pick}.csv", "text/csv")
 
 # ═════════════════════ ③ α 스윕 · 모드 비교 ═════════════════════
 with tab3:
-    st.subheader("파레토 곡선 — 탄소 vs 레이턴시 트레이드오프")
-    st.caption("ILP의 비용함수(α로 가중)는 run **안**에서 최적 x\\*를 찾는 운전대이고, "
-               "아래 **평가점수**는 모든 run을 같은 잣대로 재는 심판입니다. 둘은 별개.")
+    st.subheader("파레토 곡선 — 사후 평가 (7일 집계)")
+    st.caption("run 하나가 점 하나 (x=평균 지연, y=총 탄소). **파란 곡선은 같은 7일을 "
+               "α만 바꿔 여러 번 재생해야 얻어지는 사후(hindsight) 기준선**이고, "
+               "auto는 매 시각 그 시점 정보만으로 실시간 달성한 값입니다. "
+               "실시간 관점의 그림(누적 배출·시간별 라우팅)은 ②탭에 있습니다.")
 
-    w_c = st.slider("평가 가중치 — 탄소를 얼마나 중요하게 볼지 (심판의 잣대)",
-                    0.0, 1.0, 0.5, 0.05)
+    if AUTO:
+        st.success(
+            f"⭐ **α = auto (슬롯별 파레토 무릎점)** — 총 탄소 {AM['total_carbon_kg']:,.0f} kg "
+            f"(baseline 대비 {(1 - AM['total_carbon_kg']/BASE_M['total_carbon_kg'])*100:.1f}% 절감) · "
+            f"평균 지연 {AM['avg_latency_ms']:.1f} ms · 슬롯 평균 α = {AM['alpha']:g}")
 
-    # 종합 절감률 (α와 무관한 전역 고정 앵커, 높을수록 좋음):
-    #   탄소절감% = 1 − 탄소/최대탄소     (최대 = α=0/baseline, 691kg)
-    #   지연절감% = 1 − 지연/최대지연     (최대 = 전체 run 중 최악 평균지연, α=1 무제한)
-    # 앵커가 "전체에서 도달 가능한 최대치"로 고정돼 있어 거리 정책이 달라도 같은
-    # 잣대 — 정책 내 최악값(범위) 정규화는 지연 범위가 좁은 정책(1200km 등)에서
-    # 몇 ms 차이를 과대평가해 α=0 쪽으로 왜곡되므로 쓰지 않음.
-    MAX_C = BASE_M["total_carbon_kg"]
-    MAX_L = max(summary[k]["metrics"]["avg_latency_ms"] for k in summary)
+    def saving_pct(m):  # baseline 대비 탄소 절감률 (%) — 높을수록 좋음
+        return (1 - m["total_carbon_kg"] / BASE_M["total_carbon_kg"]) * 100
 
-    def carbon_saving(name):
-        return 1 - summary[name]["metrics"]["total_carbon_kg"] / MAX_C
-
-    def latency_saving(name):
-        return 1 - summary[name]["metrics"]["avg_latency_ms"] / MAX_L
-
-    def eval_score(name):  # 종합 절감률
-        return w_c * carbon_saving(name) + (1 - w_c) * latency_saving(name)
-
-    best = max(ALPHA_RUNS, key=eval_score)
-    BM = summary[best]["metrics"]
-    st.success(f"⭐ **추천 α = {best.split('_')[1]}** (종합 절감률 {eval_score(best)*100:.1f}%) — "
-               f"최대 탄소({MAX_C:,.0f} kg) 대비 **{carbon_saving(best)*100:.1f}% 절감**, "
-               f"최대 지연({MAX_L:.0f} ms) 대비 **{latency_saving(best)*100:.1f}% 억제** "
-               f"(실측: {BM['total_carbon_kg']:,.0f} kg · {BM['avg_latency_ms']:.1f} ms)")
-
-    xs = [summary[k]["metrics"]["avg_latency_ms"] for k in ALPHA_RUNS]
-    ys = [summary[k]["metrics"]["total_carbon_kg"] for k in ALPHA_RUNS]
-    labels = [f"α={k.split('_')[1]}" for k in ALPHA_RUNS]
+    FIXED_RUNS = [k for k in ALPHA_RUNS if k != AUTO]  # 곡선은 고정 α만으로
+    xs = [summary[k]["metrics"]["avg_latency_ms"] for k in FIXED_RUNS]
+    ys = [saving_pct(summary[k]["metrics"]) for k in FIXED_RUNS]
+    labels = [f"α={k.split('_')[1]}" for k in FIXED_RUNS]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=xs, y=ys, mode="lines+markers+text", text=labels, textposition="top right",
-        textfont=dict(color=INK), name="탄소 인지 LB",
-        line=dict(color=ACCENT, width=2), marker=dict(size=10, color=ACCENT)))
+        x=xs, y=ys, mode="lines+markers+text", text=labels, textposition="bottom right",
+        textfont=dict(color=INK), name="고정 α 스윕",
+        line=dict(color=ACCENT, width=2), marker=dict(size=10, color=ACCENT),
+        hovertemplate="%{text}: 지연 %{x:.1f}ms · 절감 %{y:.1f}%<extra></extra>"))
     fig.add_trace(go.Scatter(
-        x=[BASE_M["avg_latency_ms"]], y=[BASE_M["total_carbon_kg"]],
+        x=[BASE_M["avg_latency_ms"]], y=[0],
         mode="markers+text", text=["baseline"], textposition="top right",
-        textfont=dict(color=MUTED), name="baseline",
+        textfont=dict(color=MUTED), name="baseline (절감 0%)",
         marker=dict(size=12, color=BASELINE_GRAY, symbol="diamond")))
-    fig.add_trace(go.Scatter(
-        x=[BM["avg_latency_ms"]], y=[BM["total_carbon_kg"]],
-        mode="markers", name="⭐ 추천 α",
-        marker=dict(size=22, color="rgba(0,0,0,0)",
-                    line=dict(color=INK, width=2), symbol="circle")))
+    if AUTO:
+        fig.add_trace(go.Scatter(
+            x=[AM["avg_latency_ms"]], y=[saving_pct(AM)],
+            mode="markers+text", text=["★ α=auto"], textposition="top left",
+            textfont=dict(color=INK, size=14), name="α = auto (무릎점)",
+            marker=dict(size=14, color=INK, symbol="star")))
     fig.update_layout(**LAYOUT, height=440, legend=dict(orientation="h", y=1.1),
-                      xaxis_title="평균 네트워크 지연 (ms)",
-                      yaxis_title="총 탄소 배출 (kg CO₂)")
+                      xaxis_title="평균 네트워크 지연 (ms) — 오른쪽일수록 비쌈",
+                      yaxis_title="탄소 절감률 (% vs baseline) — 위일수록 좋음")
     st.plotly_chart(fig, width="stretch")
-    st.caption("좌하단이 이상적. 검은 링 = 현재 평가 가중치 기준 균형점. "
-               "슬라이더를 움직이면 '심판의 잣대'가 바뀌어 추천 α도 달라집니다.")
-
-    # α 미세 탐색 결과 (fine_alpha_search.py 실행 시 생성)
-    fine_path = RESULTS_DIR / "fine_alpha.csv"
-    if fine_path.exists():
-        fine = pd.read_csv(fine_path)
-        pol_key = {"": "none", "_d2500": "d2500", "_d1200": "d1200"}[SUFFIX]
-        f = fine[fine.policy == pol_key].sort_values("alpha")
-        if len(f):
-            st.subheader("α 미세 탐색 (0.01 간격, 피크 주변)")
-            sc = (w_c * (1 - f.total_carbon_kg / MAX_C)
-                  + (1 - w_c) * (1 - f.avg_latency_ms / MAX_L)) * 100
-            peak_i = int(sc.values.argmax())
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=f.alpha, y=sc, mode="lines+markers",
-                line=dict(color=ACCENT, width=2), marker=dict(size=7, color=ACCENT),
-                hovertemplate="α=%{x:.2f}: %{y:.2f}%<extra></extra>", name="종합 절감률"))
-            fig.add_trace(go.Scatter(
-                x=[f.alpha.iloc[peak_i]], y=[sc.iloc[peak_i]], mode="markers",
-                marker=dict(size=20, color="rgba(0,0,0,0)",
-                            line=dict(color=INK, width=2)), name="⭐ 피크"))
-            fig.update_layout(**LAYOUT, height=340, legend=dict(orientation="h", y=1.15),
-                              xaxis_title="α", yaxis_title="종합 절감률 (%)")
-            st.plotly_chart(fig, width="stretch")
-            st.caption(f"현재 가중치(탄소 {w_c:g}) 기준 피크: "
-                       f"**α = {f.alpha.iloc[peak_i]:.2f}** "
-                       f"(절감률 {sc.iloc[peak_i]:.2f}%). 곡선이 평평한 구간(플라토)이면 "
-                       f"그 안의 α는 사실상 동급입니다.")
-
-            with st.expander(f"α 세부 표 — 탐색한 {len(f)}개 지점 전체 (0.01 간격 포함)"):
-                tbl = pd.DataFrame({
-                    "α": f.alpha.round(2),
-                    "총탄소_kg": f.total_carbon_kg,
-                    "평균지연_ms": f.avg_latency_ms.round(2),
-                    "탄소절감(vs최대)": ((1 - f.total_carbon_kg / MAX_C) * 100).round(1)
-                                        .astype(str) + "%",
-                    "지연절감(vs최대)": ((1 - f.avg_latency_ms / MAX_L) * 100).round(1)
-                                        .astype(str) + "%",
-                    "종합절감률": sc.round(2).astype(str) + "%",
-                    "드롭": f.dropped,
-                    "추천": ["⭐" if i == peak_i else "" for i in range(len(f))],
-                })
-                st.dataframe(tbl, width="stretch", hide_index=True)
+    st.caption("**좌상단이 이상적** (지연은 적게, 절감은 많이). ★ = auto가 실제로 도달한 "
+               "지점 — 곡선보다 위에 떠 있다면 같은 지연 예산으로 고정 α보다 더 아꼈다는 뜻. "
+               "auto의 슬롯별 α 변화는 ②탭에서 볼 수 있습니다.")
 
     st.divider()
     st.subheader("세 가지 운영 모드")
-    modes = [(f"alpha_0{SUFFIX}", "🏠 지역(레이턴시) 중심", "α=0 — 항상 가장 가까운 리전"),
-             (f"alpha_0.5{SUFFIX}", "⚖️ 균형", "α=0.5 — 탄소·지연 절충"),
-             (f"alpha_1{SUFFIX}", "🌱 탄소 중심", "α=1 — 항상 가장 깨끗한 리전")]
+    modes = [("alpha_0", "🏠 지역(레이턴시) 중심", "α=0 — 항상 가장 가까운 리전"),
+             ("alpha_0.5", "⚖️ 균형", "α=0.5 — 탄소·지연 절충"),
+             ("alpha_1", "🌱 탄소 중심", "α=1 — 항상 가장 깨끗한 리전")]
     cols = st.columns(3)
     for col, (key, title, desc) in zip(cols, modes):
         m = summary[key]["metrics"]
@@ -321,20 +444,14 @@ with tab3:
     for name in ["baseline"] + ALPHA_RUNS:
         m = summary[name]["metrics"]
         rows.append(dict(
-            run=name, 모드=m["mode"], α=f"{m['alpha']:g}" if m["mode"] == "ilp" else "—",
+            run=name, 모드=m["mode"],
+            α=("—" if m["mode"] != "ilp"
+               else f"auto (평균 {m['alpha']:g})" if m.get("alpha_mode") == "auto"
+               else f"{m['alpha']:g}"),
             총탄소_kg=m["total_carbon_kg"],
             평균지연_ms=m["avg_latency_ms"], p95지연_ms=m["p95_latency_ms"],
             홈리전=f"{m['home_ratio']*100:.1f}%", 드롭=m["dropped"],
-            **{"내부비용(참고용)": m.get("ilp_score", None),
-               "탄소절감(vs최대)": f"{carbon_saving(name)*100:.1f}%",
-               "지연절감(vs최대)": f"{latency_saving(name)*100:.1f}%",
-               "종합절감률": f"{eval_score(name)*100:.1f}%"},
-            추천="⭐" if name == best else ""))
+            **{"탄소절감(vs baseline)":
+               f"{(1 - m['total_carbon_kg']/BASE_M['total_carbon_kg'])*100:.1f}%"}))
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    st.caption(
-        "**내부비용(참고용)** = ILP 목적함수 합 Σ(α·M̃+(1−α)·l̃). α라는 색안경을 낀 채 계산된 "
-        "값이라 α가 다른 run끼리는 비교 불가 — α=0에서 탄소가 최악인데도 ≈0이 나오는 것이 그 "
-        "증거입니다. run **선정에는 사용하지 않습니다.**  \n"
-        "**종합절감률** = w·탄소절감% + (1−w)·지연절감%. 앵커는 전역 최대치 고정 — "
-        "최대 탄소는 α=0(baseline), 최대 지연은 α=1·거리 무제한의 평균 지연. "
-        "거리 정책이 달라도 같은 잣대이며, ⭐ 추천 α는 이 값이 최대인 run입니다.")
+    st.caption("고정 α run들은 auto의 비교 기준입니다. auto = 매 슬롯 파레토 무릎점 α 자동 선택.")
