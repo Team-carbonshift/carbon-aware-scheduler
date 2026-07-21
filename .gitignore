@@ -13,9 +13,10 @@ __MACOSX/
 # 원본 압축파일 (scheduler/data/job/ 에 풀려 있음)
 job.zip
 
-# 에디터/IDE
+# 에디터/IDE · 로컬 도구 설정
 .vscode/
 .idea/
+.claude/
 
 # Streamlit
 .streamlit/secrets.toml
