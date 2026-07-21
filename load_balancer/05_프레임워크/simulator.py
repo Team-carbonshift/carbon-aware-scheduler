@@ -16,6 +16,8 @@ baseline 모드 = jobs.csv의 원래 region 그대로 (전/후 비교의 "전").
 """
 import heapq
 import json
+import os
+import sys
 from dataclasses import dataclass, asdict, field
 
 import numpy as np
@@ -24,29 +26,86 @@ import pulp
 
 from config import REGIONS, L_NET_MAX_MS, DATA_DIR
 
+# interface 모듈 경로 등록 (repo 루트 기준)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+try:
+    from interface import carbon_forecast_api as _cfa
+    from interface.regions import LB_TO_REGION as _LB_TO_STD, REGION_TO_LB as _STD_TO_LB
+    _INTERFACE_OK = True
+except ImportError:
+    _INTERFACE_OK = False
+
+_REAL_CSV = os.path.join(_REPO_ROOT, "carbon-forecast-LSTM", "data", "carbon_intensity_demo.csv")
+_BASE_TIME = pd.Timestamp("2026-01-01 00:00:00")
+
 
 # ────────────────────────── 탄소강도 시계열 ──────────────────────────
 class CarbonSeries:
     def __init__(self, csv_path=DATA_DIR / "carbon_intensity.csv"):
+        # 합성 데이터 (폴백 / 호환성 유지)
         df = pd.read_csv(csv_path)
         self.t = df["time_s"].to_numpy()
         self.step = float(self.t[1] - self.t[0])
         self.ci = {r: df[r].to_numpy() for r in REGIONS}
 
+        # 실데이터 (탄소 회계용, 시간 인덱스 배열)
+        self._real: dict | None = None
+        if _INTERFACE_OK and os.path.exists(_REAL_CSV):
+            self._load_real()
+
+    def _load_real(self):
+        df = pd.read_csv(_REAL_CSV, parse_dates=["timestamp"])
+        df = df[df["timestamp"] >= _BASE_TIME].copy()
+        real = {}
+        for std_code, grp in df.groupby("region"):
+            lb = _STD_TO_LB.get(std_code)
+            if lb not in REGIONS:
+                continue
+            grp = grp.sort_values("timestamp")
+            hours = ((grp["timestamp"] - _BASE_TIME).dt.total_seconds() / 3600).round().astype(int)
+            arr = np.zeros(int(hours.max()) + 1)
+            for h, v in zip(hours.values, grp["carbon_intensity"].values):
+                arr[h] = float(v)
+            real[lb] = arr
+        if len(real) == len(REGIONS):
+            self._real = real
+
     def at(self, region: str, t: float) -> float:
-        """시각 t의 탄소강도 (step 함수)."""
+        """시각 t의 탄소강도. 실데이터 우선, 없으면 합성 데이터."""
+        if self._real is not None:
+            h = min(int(t / 3600), len(self._real[region]) - 1)
+            return float(self._real[region][h])
         i = min(int(t // self.step), len(self.t) - 1)
         return float(self.ci[region][i])
 
     def forecast(self, t: float) -> np.ndarray:
-        """슬롯 t 시점의 리전별 예측 탄소강도 (8,).
-        ★ LSTM 연결 지점: 지금은 perfect forecast (실측 반환)."""
+        """슬롯 t 시점의 리전별 예측 탄소강도 (8,). LSTM 우선, 없으면 실측 반환."""
+        if _INTERFACE_OK and _cfa._state["ready"]:
+            try:
+                pred = _cfa.get_forecast(t_hour=t / 3600.0, horizon=1)
+                return np.array([pred[_LB_TO_STD[r]][0] for r in REGIONS])
+            except Exception:
+                pass
         return np.array([self.at(r, t) for r in REGIONS])
 
     def integrate_gco2(self, region: str, t0: float, t1: float, power_kw: float = 1.0) -> float:
         """[t0, t1] 실행 시 배출량 (g). ∫ CI dt × P / 3600."""
         if t1 <= t0:
             return 0.0
+        if self._real is not None:
+            # 실데이터: 시간 단위 step으로 적분
+            h0, h1 = int(t0 / 3600), int(t1 / 3600)
+            arr = self._real[region]
+            total = 0.0
+            for h in range(h0, min(h1 + 1, len(arr))):
+                seg0 = max(t0, h * 3600.0)
+                seg1 = min(t1, (h + 1) * 3600.0)
+                if seg1 > seg0:
+                    total += arr[min(h, len(arr) - 1)] * (seg1 - seg0)
+            return total / 3600.0 * power_kw
         i0, i1 = int(t0 // self.step), int(min(t1, self.t[-1] + self.step) // self.step)
         i1 = min(i1, len(self.t) - 1)
         total = 0.0

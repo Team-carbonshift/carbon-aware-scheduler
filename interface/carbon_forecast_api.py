@@ -23,6 +23,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_HERE)
 LSTM_DIR = os.path.join(_REPO_ROOT, "carbon-forecast-LSTM")
 LSTM_MODEL_DIR = os.path.join(LSTM_DIR, "models")
+LSTM_DATA_CSV = os.path.join(LSTM_DIR, "data", "carbon_intensity_demo.csv")
 
 FORECAST_HORIZON = 24  # LSTM이 내놓는 예측 길이 (시간)
 SEQ_LEN = 168          # LSTM이 요구하는 입력 이력 길이 (시간)
@@ -184,4 +185,4 @@ def backend_info():
 
 
 # import 시점에 한 번 자동 시도 (실패해도 더미로 계속 동작)
-init_lstm()
+init_lstm(carbon_csv=LSTM_DATA_CSV)
