@@ -25,6 +25,25 @@ interface/              ← 위 셋을 이어주는 계약 계층
 
 ---
 
+## 0. 통합 대시보드 실행
+
+3개 모듈 UI를 한 앱에서 볼 수 있습니다.
+
+```bash
+streamlit run interface/app.py
+```
+
+| 화면 | 내용 | 실제 스크립트 |
+|---|---|---|
+| 전체 개요 | 연결 상태 한눈에 | `interface/views/overview.py` |
+| ① 로드밸런서 | 어느 리전에서 실행할지 | `load_balancer/05_프레임워크/app.py` (원본 그대로) |
+| ② LSTM | 탄소강도 24h 예측 | `interface/views/lstm_view.py` |
+| ③ 스케줄러 | 언제 실행할지 (time-shift) | `scheduler/scheduler/gui.py` (원본 그대로) |
+
+각 모듈의 기존 앱을 **복제하지 않고 그대로 불러옵니다**. 개별 실행도 여전히 가능합니다.
+
+---
+
 ## 1. `regions.py` — 리전 표기 통합
 
 같은 리전을 세 모듈이 **다른 이름**으로 부르고 있었습니다. 이게 가장 큰 연결 문제였습니다.
@@ -66,20 +85,34 @@ forecast = carbon_forecast_api.get_forecast(t_hour=12, horizon=24)
 # -> {"KR": [24개 값], "FR": [...], ...}   단위 gCO₂/kWh, index 0 = 기준 시각
 ```
 
-**2단계 폴백**으로 동작합니다.
+**2단계 자동 폴백**으로 동작합니다 (import 시점에 `init_lstm()`이 자동 실행됨).
 
-1. **실제 LSTM** — torch 설치 + `models/*.pt` 존재 + 과거 탄소강도 데이터가 있으면 진짜 예측
-2. **더미** — 위 조건이 안 되면 사인파 + 노이즈 (개발·데모용)
+1. **실제 LSTM** — torch 설치 + `models/*.pt` 존재 + 요청 시점 t 이전 **168시간 이력**이 있으면 진짜 예측
+2. **더미** — 위 조건이 안 되면 사인파 + 노이즈
 
-현재 어느 쪽인지는 `backend_info()`로 확인합니다.
+호출마다 어느 쪽이 응답했는지 `last_backend()`로 확인할 수 있습니다.
 
 ```python
-carbon_forecast_api.try_init_lstm(carbon_csv="…/carbon_intensity.csv")  # 1단계 시도
-carbon_forecast_api.backend_info()   # "실제 LSTM 모델 …" 또는 "더미 예측 …"
+carbon_forecast_api.backend_info()   # 전반적인 연결 상태
+carbon_forecast_api.last_backend()   # 'lstm' | 'dummy'  ← 방금 그 호출이 쓴 백엔드
+carbon_forecast_api.status()         # 예측 가능 구간 등 상세
 ```
 
 > LSTM 쪽 원래 시그니처는 `get_forecast_at(t, models, scalers, all_df)` 이며,
 > 이 어댑터가 그 호출과 리전 코드 변환을 대신 처리합니다.
+
+### 입력 이력 — `carbon_history.py`
+
+LSTM은 t 이전 168시간의 `carbon_intensity` + `cfe_pct` + `re_pct` 를 요구합니다.
+
+| 컬럼 | 현재 출처 |
+|---|---|
+| `carbon_intensity` | `load_balancer/…/data/carbon_intensity.csv` (8리전 × 192시간) |
+| `cfe_pct`, `re_pct` | ⚠️ **임시 추정값** — 실측 데이터가 아직 없어 탄소강도로부터 역산 |
+
+이 때문에 **현재 실제 LSTM은 t ≈ 168~191h 구간에서만 동작**하고, 그 밖에서는 더미로 폴백합니다.
+데이터 파이프라인 담당이 실측 CSV(`timestamp, region, carbon_intensity, cfe_pct, re_pct`)를 주면
+`init_lstm(carbon_csv=…)`에 넘기는 것만으로 전 구간 실제 예측으로 바뀝니다.
 
 ---
 

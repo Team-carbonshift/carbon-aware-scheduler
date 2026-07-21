@@ -28,10 +28,21 @@
 - [`interface/README.md`](interface/README.md) — **모듈 간 계약** (리전 표기 통합, 예측·배정 데이터 형식)
 - [`scheduler/README.md`](scheduler/README.md) — time-shift 알고리즘, 비교군, 대시보드 사용법
 
-## 빠른 실행 (스케줄러 대시보드)
+## 빠른 실행 — 통합 대시보드
+
+3개 모듈 UI를 한 앱에서 볼 수 있습니다.
 
 ```bash
-cd scheduler
-pip install -r requirements.txt
-streamlit run scheduler/gui.py
+pip install -r scheduler/requirements.txt
+pip install -r carbon-forecast-LSTM/requirements.txt   # 실제 LSTM 예측을 쓰려면 필요
+streamlit run interface/app.py
+```
+
+화면: 전체 개요 / ① 로드밸런서 / ② LSTM 예측 / ③ 스케줄러
+
+개별 실행도 그대로 가능합니다.
+
+```bash
+streamlit run load_balancer/05_프레임워크/app.py   # 로드밸런서만
+streamlit run scheduler/scheduler/gui.py          # 스케줄러만
 ```

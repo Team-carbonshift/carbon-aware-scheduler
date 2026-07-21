@@ -19,17 +19,23 @@ def generate_master_series(total_hours):
 
 
 def get_carbon_forecast(horizon=FORECAST_HORIZON, master_series=None, now_hour=0,
-                        base_time=None):
+                        prefer_lstm=True):
     """now_hour 시점의 향후 horizon시간 예측.
 
+    실제 LSTM을 쓸 수 있는 시점이면 LSTM이, 아니면 더미가 응답한다(자동).
     반환 형식은 LSTM 계약과 동일하게 {"generated_at", "forecast"} 를 유지한다.
     """
     forecast = carbon_forecast_api.get_forecast(
         t_hour=now_hour, horizon=horizon,
-        master_series=master_series, base_time=base_time)
+        master_series=master_series, prefer_lstm=prefer_lstm)
     return {"generated_at": f"t+{now_hour}h", "forecast": forecast}
 
 
 def backend_info():
     """현재 예측 백엔드 설명 (화면 표시용)."""
     return carbon_forecast_api.backend_info()
+
+
+def last_backend():
+    """마지막 예측이 실제로 쓴 백엔드 ('lstm' | 'dummy')."""
+    return carbon_forecast_api.last_backend()
