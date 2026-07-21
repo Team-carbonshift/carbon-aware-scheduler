@@ -4,7 +4,7 @@
     {
       "name": "carbon-scheduler-gui",
       "runtimeExecutable": "C:\\Develop\\carbon\\venv\\Scripts\\streamlit.exe",
-      "runtimeArgs": ["run", "scheduler/gui.py", "--server.headless", "true"],
+      "runtimeArgs": ["run", "scheduler/scheduler/gui.py", "--server.headless", "true"],
       "port": 8501
     }
   ]

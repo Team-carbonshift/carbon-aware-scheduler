@@ -151,19 +151,22 @@ carbon_emitted = (실행 구간의 평균 탄소강도) × duration
 
 ## 7. 디렉토리 구조
 
+저장소는 담당별 최상위 폴더로 나뉩니다 (`load_balancer/` = 로드밸런서 담당, `scheduler/` = 이 문서).
+
 ```
-carbon/
-├── run_cli.py               # 터미널에서 3개 비교군 빠르게 실행
+scheduler/                       # ← 스케줄러(time-shift) 담당 전체
+├── README.md                    # 이 문서
+├── run_cli.py                   # 터미널에서 3개 비교군 빠르게 실행
 ├── requirements.txt
-├── data/job/                # job 데이터 (위 6절 참고)
-└── scheduler/
-    ├── config.py            # L_max, 리전/zone/국가코드 매핑, 더미 탄소 프로필, 비교군 정의
-    ├── carbon_forecast.py   # LSTM 예측 인터페이스 (현재 더미, 교체 지점)
-    ├── data_loader.py       # jobs.csv / routed csv 로딩·전처리
-    ├── scheduler.py         # 핵심: α 계산, LB 정책, time-shift 알고리즘, 비교군 분기
-    ├── simulator.py         # SimPy 이벤트 시뮬레이션 루프
-    ├── metrics.py           # 지표 집계·출력
-    └── gui.py               # Streamlit 웹 대시보드
+├── data/job/                    # job 데이터 (위 6절 참고)
+└── scheduler/                   # 파이썬 패키지
+    ├── config.py                # L_max, 리전/zone/국가코드 매핑, 더미 탄소 프로필, 비교군 정의
+    ├── carbon_forecast.py       # LSTM 예측 인터페이스 (현재 더미, 교체 지점)
+    ├── data_loader.py           # jobs.csv / routed csv 로딩·전처리
+    ├── scheduler.py             # 핵심: α 계산, time-shift 알고리즘, 비교군 분기
+    ├── simulator.py             # SimPy 이벤트 시뮬레이션 루프
+    ├── metrics.py               # 지표 집계·출력
+    └── gui.py                   # Streamlit 웹 대시보드
 ```
 
 시뮬레이션 흐름: `data_loader`가 job을 읽고 → `carbon_forecast`가 탄소 시계열을 만들고 →
@@ -174,8 +177,11 @@ carbon/
 
 ## 8. 실행 방법
 
+아래 명령은 모두 이 `scheduler/` 폴더 안에서 실행합니다.
+
 ### 설치
 ```bash
+cd scheduler
 python -m venv venv
 venv\Scripts\activate          # Windows (Git Bash: source venv/Scripts/activate)
 pip install -r requirements.txt
