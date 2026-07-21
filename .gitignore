@@ -1,0 +1,19 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# macOS 압축 잔재
+__MACOSX/
+.DS_Store
+
+# 원본 압축파일 (data/job/ 에 풀려 있음)
+job.zip
+
+# 에디터/IDE
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
