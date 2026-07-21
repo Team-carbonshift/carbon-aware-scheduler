@@ -1,14 +1,16 @@
 # Python
 venv/
+.venv/
 __pycache__/
+*.pyc
 *.py[cod]
 *.egg-info/
 
-# macOS 압축 잔재
+# OS / 압축 잔재
 __MACOSX/
 .DS_Store
 
-# 원본 압축파일 (data/job/ 에 풀려 있음)
+# 원본 압축파일 (scheduler/data/job/ 에 풀려 있음)
 job.zip
 
 # 에디터/IDE
