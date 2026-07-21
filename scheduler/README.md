@@ -135,38 +135,48 @@ carbon_emitted = (실행 구간의 평균 탄소강도) × duration
 - `jobs_routed_alpha_auto.csv` — 로드밸런서가 **실제 리전 배정 결과**(`배정` 컬럼)와 슬롯별 `α`를 붙여 넘겨준 버전. 있으면 이 파일을 우선 사용.
 - `README_jobs.md` — job 데이터 상세 스펙
 
-스케줄러는 리전을 스스로 고르지 않습니다. 로드밸런서가 배정한 리전(`배정` → `carbon_region`)을 그대로 사용하며, 이 값이 없는 경우(순수 `jobs.csv`)에는 원본 `region`을 씁니다.
+스케줄러는 리전을 스스로 고르지 않습니다. 로드밸런서가 배정한 리전을 그대로 사용하며,
+읽는 일은 `interface/lb_assignment.py`가 맡습니다 (로드밸런서 공식 산출물 `assign_*.csv`도 동일하게 지원).
 
-### 탄소강도 예측 — `scheduler/carbon_forecast.py`
-- 실제 LSTM 인터페이스 계약과 동일한 함수 `get_carbon_forecast(horizon=24)` 제공
-- 반환 형식: `{"generated_at": ..., "forecast": {zone: [24개 값]}}`
-- **현재는 사인파 + 노이즈 더미**. 팀원이 실제 LSTM을 완성하면 **이 파일만 교체**하면 나머지 코드는 그대로 동작합니다.
+### 탄소강도 예측 — `interface/carbon_forecast_api.py`
+- 스케줄러는 `get_forecast(t_hour, horizon=24)` 하나만 호출합니다 (LSTM 내부는 모름)
+- **실제 LSTM 모델이 있으면 그걸 쓰고, 없으면 더미(사인파+노이즈)로 자동 폴백**합니다
+- 현재 어느 백엔드인지는 `backend_info()`로 확인 가능
 
-### 8개 리전 (electricitymaps zone 코드)
-`US-CAL-CISO`(미 서부/캘리포니아), `US-TEX-ERCO`(미 중부/텍사스), `US-MIDA-PJM`(미 동부/뉴욕),
-`FR`(프랑스), `DE`(독일), `KR`(한국), `IN-NO`(인도), `JP-TK`(일본).
-지도에서는 3개 미국 리전이 하나의 국가(USA)로 합쳐집니다 (`config.py`의 `ZONE_TO_ISO3`).
+### 8개 리전 (LSTM zone 코드 기준으로 통일)
+`US-CAL-CISO`(미 서부/캘리포니아), `US-TEX-ERCO`(미 중부/텍사스), `US-NY-NYIS`(미 동부/뉴욕),
+`FR`(프랑스), `DE`(독일), `KR`(한국), `IN`(인도), `JP`(일본).
+
+리전 이름은 모듈마다 표기가 달라서(`Korea` vs `KR` 등) `interface/regions.py`가 단일 출처로 관리합니다.
+지도에서는 3개 미국 리전이 하나의 국가(USA)로 합쳐집니다 (`regions.to_iso3()`).
 
 ---
 
 ## 7. 디렉토리 구조
 
-저장소는 담당별 최상위 폴더로 나뉩니다 (`load_balancer/` = 로드밸런서 담당, `scheduler/` = 이 문서).
+저장소는 담당별 최상위 폴더로 나뉘고, 그 사이는 `interface/`가 이어줍니다.
 
 ```
-scheduler/                       # ← 스케줄러(time-shift) 담당 전체
-├── README.md                    # 이 문서
-├── run_cli.py                   # 터미널에서 3개 비교군 빠르게 실행
-├── requirements.txt
-├── data/job/                    # job 데이터 (위 6절 참고)
-└── scheduler/                   # 파이썬 패키지
-    ├── config.py                # L_max, 리전/zone/국가코드 매핑, 더미 탄소 프로필, 비교군 정의
-    ├── carbon_forecast.py       # LSTM 예측 인터페이스 (현재 더미, 교체 지점)
-    ├── data_loader.py           # jobs.csv / routed csv 로딩·전처리
-    ├── scheduler.py             # 핵심: α 계산, time-shift 알고리즘, 비교군 분기
-    ├── simulator.py             # SimPy 이벤트 시뮬레이션 루프
-    ├── metrics.py               # 지표 집계·출력
-    └── gui.py                   # Streamlit 웹 대시보드
+carbon-aware-scheduler/
+├── carbon-forecast-LSTM/        # LSTM 담당 (탄소강도 24h 예측)
+├── load_balancer/               # 로드밸런서 담당 (어느 리전에서?)
+├── interface/                   # 모듈 간 데이터 계약 ← interface/README.md 참고
+│   ├── regions.py               #   리전 표기 통합 (LB 표기 ↔ LSTM 코드 ↔ ISO-3)
+│   ├── carbon_forecast_api.py   #   LSTM 경계 (실모델 또는 더미)
+│   └── lb_assignment.py         #   로드밸런서 배정 결과 로딩
+└── scheduler/                   # ← 스케줄러(time-shift) 담당, 이 문서
+    ├── README.md
+    ├── run_cli.py               # 터미널에서 3개 비교군 빠르게 실행
+    ├── requirements.txt
+    ├── data/job/                # job 데이터 (위 6절 참고)
+    └── scheduler/               # 파이썬 패키지
+        ├── config.py            # L_max, 비교군 정의 (리전 정의는 interface에서 가져옴)
+        ├── carbon_forecast.py   # interface/carbon_forecast_api 로 위임하는 얇은 계층
+        ├── data_loader.py       # job 로딩 + 로드밸런서 배정 붙이기
+        ├── scheduler.py         # 핵심: α 계산, time-shift 알고리즘, 비교군 분기
+        ├── simulator.py         # SimPy 이벤트 시뮬레이션 루프
+        ├── metrics.py           # 지표 집계·출력
+        └── gui.py               # Streamlit 웹 대시보드
 ```
 
 시뮬레이션 흐름: `data_loader`가 job을 읽고 → `carbon_forecast`가 탄소 시계열을 만들고 →
