@@ -43,7 +43,7 @@ _DUMMY_SEED = 42
 
 _state = {
     "ready": False,          # LSTM 사용 준비됨?
-    "models": None, "scalers": None, "module": None,
+    "models": None, "scalers": None, "weather_scalers": None, "module": None,
     "history": None,         # LSTM 입력 이력 DataFrame
     "placeholder": True,     # cfe/re가 임시 추정값인가
     "base_time": None,
@@ -108,13 +108,14 @@ def init_lstm(carbon_csv=None, master_series=None, force=False):
 
         history, placeholder = load_history(
             carbon_csv=carbon_csv, master_series=master_series)
-        models, scalers = lstm_mod.load_all_models(LSTM_MODEL_DIR)
+        models, scalers, weather_scalers = lstm_mod.load_all_models(LSTM_MODEL_DIR)
         _, _, forecastable_from = coverage(history)
     except Exception as e:
         _state["error"] = f"{type(e).__name__}: {e}"
         return False
 
-    _state.update(ready=True, models=models, scalers=scalers, module=lstm_mod,
+    _state.update(ready=True, models=models, scalers=scalers,
+                  weather_scalers=weather_scalers, module=lstm_mod,
                   history=history, placeholder=placeholder,
                   base_time=BASE_TIME, forecastable_from=forecastable_from)
     return True
@@ -132,7 +133,7 @@ def _lstm_forecast(t_hour, horizon):
     try:
         result = _state["module"].get_forecast_at(
             t=t, models=_state["models"], scalers=_state["scalers"],
-            all_df=_state["history"])
+            all_df=_state["history"], weather_scalers=_state["weather_scalers"])
     except Exception:
         return None
     out = {to_region(k): v[:horizon] for k, v in result["forecast"].items()}
