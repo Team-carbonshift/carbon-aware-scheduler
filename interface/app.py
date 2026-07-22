@@ -5,8 +5,9 @@
 
 각 모듈의 기존 Streamlit 앱을 그대로 페이지로 실행한다(코드 복제 없음).
     로드밸런서 : load_balancer/05_프레임워크/app.py
-    LSTM       : interface/pages/lstm_view.py
+    LSTM       : interface/views/lstm_view.py
     스케줄러   : scheduler/scheduler/gui.py
+    최종       : interface/views/final.py   (통합 화면, 작성 중)
 """
 
 import os
@@ -36,9 +37,10 @@ st.set_page_config = lambda *a, **k: None
 
 PAGES = {
     "전체 개요": os.path.join(_HERE, "views", "overview.py"),
-    "① 로드밸런서 — 어느 리전?": os.path.join(LB_DIR, "app.py"),
-    "② LSTM — 탄소강도 예측": os.path.join(_HERE, "views", "lstm_view.py"),
-    "③ 스케줄러 — 언제 실행?": os.path.join(SCHED_DIR, "scheduler", "gui.py"),
+    "로드밸런서": os.path.join(LB_DIR, "app.py"),
+    "LSTM": os.path.join(_HERE, "views", "lstm_view.py"),
+    "스케줄러": os.path.join(SCHED_DIR, "scheduler", "gui.py"),
+    "최종": os.path.join(_HERE, "views", "final.py"),
 }
 
 with st.sidebar:
