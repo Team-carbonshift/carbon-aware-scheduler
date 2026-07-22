@@ -226,6 +226,33 @@ with tab2:
     asel["dow"] = asel.dt.dt.dayofweek                  # 0=월 … 6=일
     asel["hod"] = asel.dt.dt.hour                       # UTC 시각 (0~23)
 
+    st.subheader("시간별 절감량 — baseline 대비")
+    bh = (assigns["baseline"]
+          .assign(h=(assigns["baseline"].submit_time // 3600).astype(int))
+          .groupby("h").carbon_g.sum())
+    ah = asel.groupby("h").carbon_g.sum()
+    saved = (bh.subtract(ah, fill_value=0.0) / 1000.0).sort_index()  # kg/h
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=ts(saved.index.to_numpy() * 3600.0), y=saved.values,
+                             name="절감량 (kg/h)", mode="lines",
+                             line=dict(color=ACCENT, width=1.2),
+                             hovertemplate="%{x|%m-%d %H시}: %{y:.1f} kg<extra></extra>"))
+    if M.get("alpha_mode") == "auto" and "alpha" in slots[alpha_pick].columns:
+        sa_a = slots[alpha_pick].dropna(subset=["alpha"])
+        fig.add_trace(go.Scatter(x=ts(sa_a.time_s), y=sa_a.alpha, name="슬롯 α",
+                                 mode="lines", yaxis="y2",
+                                 line=dict(color=MUTED, width=1, dash="dot"),
+                                 hovertemplate="α=%{y:.1f}<extra></extra>"))
+    fig.update_layout(**LAYOUT, height=340, legend=dict(orientation="h", y=1.12),
+                      xaxis_title="시각 (UTC)", yaxis_title="절감량 (kg CO₂/h)",
+                      yaxis2=dict(overlaying="y", side="right", range=[-0.05, 1.05],
+                                  title="α", showgrid=False))
+    st.plotly_chart(fig, width="stretch")
+    st.caption("0보다 위 = baseline보다 덜 배출한 시간, 아래 = 더 배출한 시간(예측이 "
+               "빗나간 슬롯 등). 회색 점선 = auto의 슬롯 α — α가 높은 시간에 절감이 "
+               "커지는지를 한 그림에서 확인할 수 있습니다. "
+               "같은 데이터가 results/hourly_savings.csv로도 저장됩니다.")
+
     if M.get("alpha_mode") == "auto":
         st.subheader("슬롯별 자동 선택 α (파레토 무릎점)")
         sa_df = slots[alpha_pick]
@@ -379,7 +406,7 @@ with tab2:
 
 # ═════════════════════ ③ α 스윕 · 모드 비교 ═════════════════════
 with tab3:
-    st.subheader("파레토 곡선 — 사후 평가 (7일 집계)")
+    st.subheader("파레토 곡선 — 사후 평가 (1년 집계)")
     st.caption("run 하나가 점 하나 (x=평균 지연, y=총 탄소). **파란 곡선은 같은 7일을 "
                "α만 바꿔 여러 번 재생해야 얻어지는 사후(hindsight) 기준선**이고, "
                "auto는 매 시각 그 시점 정보만으로 실시간 달성한 값입니다. "
@@ -415,13 +442,37 @@ with tab3:
             mode="markers+text", text=["★ α=auto"], textposition="top left",
             textfont=dict(color=INK, size=14), name="α = auto (무릎점)",
             marker=dict(size=14, color=INK, symbol="star")))
-    fig.update_layout(**LAYOUT, height=440, legend=dict(orientation="h", y=1.1),
+    # 정사각형 캔버스 — 무릎점 계산(정규화 공간의 거리)과 같은 기하로 보이도록
+    fig.update_layout(**LAYOUT, height=560, width=560,
+                      legend=dict(orientation="h", y=1.08),
                       xaxis_title="평균 네트워크 지연 (ms) — 오른쪽일수록 비쌈",
                       yaxis_title="탄소 절감률 (% vs baseline) — 위일수록 좋음")
-    st.plotly_chart(fig, width="stretch")
-    st.caption("**좌상단이 이상적** (지연은 적게, 절감은 많이). ★ = auto가 실제로 도달한 "
-               "지점 — 곡선보다 위에 떠 있다면 같은 지연 예산으로 고정 α보다 더 아꼈다는 뜻. "
-               "auto의 슬롯별 α 변화는 ②탭에서 볼 수 있습니다.")
+    pc1, pc2 = st.columns([4, 3])
+    with pc1:
+        st.plotly_chart(fig, width="content")
+        st.caption("**좌상단이 이상적** (지연은 적게, 절감은 많이). ★ = auto가 실제로 "
+                   "도달한 지점 — 곡선보다 위에 떠 있다면 같은 지연 예산으로 고정 α보다 "
+                   "더 아꼈다는 뜻. auto의 슬롯별 α 변화는 ②탭에서 볼 수 있습니다.")
+
+    with pc2, st.expander("Q. 곡선이 왜 이런 모양인가요? — 무릎점이 생기는 이유",
+                          expanded=True):
+        st.markdown(
+            "점 하나 = α 하나로 1년을 완주한 run. x축 = 지불한 값(평균 지연), "
+            "y축 = 얻은 것(탄소 절감률)입니다.\n\n"
+            "**곡선이 처음엔 가파르다가 점점 눕는 이유 = 한계 수익 체감:**\n"
+            "- α를 조금만 올려도 처음엔 **싼 거래**부터 잡습니다 — 프랑스↔독일(12ms), "
+            "한국↔일본(30ms)처럼 몇 ms만 내주면 큰 절감이 나오는 경로들.\n"
+            "- α를 더 올릴수록 남은 건 **비싼 거래**뿐입니다 — 아시아→유럽(240ms급) "
+            "장거리를 태워야 겨우 조금 더 아껴지는 구간.\n"
+            "- 실측으로 보면: α 0→0.5는 지연 29ms로 절감 46%를 사지만, "
+            "0.75→1은 **지연 +52ms를 내고 절감 +1%p**밖에 못 삽니다.\n\n"
+            "**무릎점 = 싼 거래가 소진되는 경계.** 그 앞은 '안 사면 손해', 그 뒤는 "
+            "'사면 손해'인 지점이라, 합리적 운영점은 무릎 근처일 수밖에 없습니다.\n\n"
+            "**★(auto)가 곡선보다 위에 뜨는 이유:** 고정 α는 교환비가 나쁜 시간(리전 간 "
+            "탄소 격차가 없는 시간)에도 같은 강도로 job을 옮겨 지연을 낭비합니다. auto는 "
+            "매 시간 그 시간의 곡선에서 무릎을 다시 찾아 좋은 시간에만 공격적으로 움직이므로, "
+            "1년 평균으로 보면 **같은 지연 예산에서 더 많은 절감**이 나옵니다 — 이 별이 "
+            "곡선 위에 있다는 것 자체가 시변 α의 존재 증명입니다.")
 
     st.divider()
     st.subheader("세 가지 운영 모드")

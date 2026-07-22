@@ -18,6 +18,31 @@ from simulator import CarbonSeries, SimConfig, run_sim
 ALPHAS = [0.0, 0.25, 0.5, 0.75, 1.0]
 
 
+def export_hourly_savings():
+    """시간별 절감량 산출물 — baseline vs auto의 배출을 시간 단위로 대조.
+
+    결과: results/hourly_savings.csv
+      time_s, baseline_g, auto_g, saved_g, saved_pct, alpha(그 슬롯의 무릎점 α)
+    같은 job 집합을 두 run이 어떻게 처리했는지의 차이라 시간별 절감이 정확히 정의됨.
+    (배출은 job 제출 시각 기준 귀속)"""
+    base = pd.read_csv(RESULTS_DIR / "assign_baseline.csv")
+    auto = pd.read_csv(RESULTS_DIR / "assign_alpha_auto.csv")
+    slots = pd.read_csv(RESULTS_DIR / "slots_alpha_auto.csv")
+
+    bh = base.assign(h=(base.submit_time // 3600).astype(int)).groupby("h").carbon_g.sum()
+    ah = auto.assign(h=(auto.submit_time // 3600).astype(int)).groupby("h").carbon_g.sum()
+    df = pd.DataFrame({"baseline_g": bh, "auto_g": ah}).fillna(0.0).sort_index()
+    df["saved_g"] = df.baseline_g - df.auto_g
+    df["saved_pct"] = (df.saved_g / df.baseline_g.where(df.baseline_g > 0) * 100).fillna(0.0)
+    df.insert(0, "time_s", df.index * 3600.0)
+    alpha_by_h = {int(t // 3600): a for t, a in zip(slots.time_s, slots.alpha)
+                  if pd.notna(a)}
+    df["alpha"] = df.index.map(alpha_by_h)
+    df.round(2).to_csv(RESULTS_DIR / "hourly_savings.csv", index=False)
+    print(f"저장: {RESULTS_DIR}/hourly_savings.csv ({len(df)}행, "
+          f"총 절감 {df.saved_g.sum()/1000:,.1f} kg)")
+
+
 def main():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     jobs = pd.read_csv(JOBS_CSV)
@@ -71,6 +96,7 @@ def main():
 
     (RESULTS_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"\n저장: {RESULTS_DIR}/summary.json")
+    export_hourly_savings()
 
 
 if __name__ == "__main__":
