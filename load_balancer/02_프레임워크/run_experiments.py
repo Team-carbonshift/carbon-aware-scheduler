@@ -97,6 +97,8 @@ def main():
     (RESULTS_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"\n저장: {RESULTS_DIR}/summary.json")
     export_hourly_savings()
+    from export_figures import export_all
+    export_all()
 
 
 if __name__ == "__main__":

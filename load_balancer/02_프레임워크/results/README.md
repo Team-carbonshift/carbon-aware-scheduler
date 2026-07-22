@@ -1,7 +1,17 @@
 # results/ — 분석용 산출물 (대시보드가 읽는 내부 데이터)
 
-`run_experiments.py` 실행 시 자동 생성. run 7개(baseline + 고정 α 5개 + auto) × 파일 2종 + 요약 2개.
-스케줄러 인계용 납품물은 여기가 아니라 `../../03_라우팅결과/`.
+`run_experiments.py` 실행 시 자동 생성. run 7개(baseline + 고정 α 5개 + auto) × 파일 2종 + 요약 2개
++ 정적 그림 5장. 스케줄러 인계용 납품물은 여기가 아니라 `../../03_라우팅결과/`.
+
+## figures/ — 발표·문서용 정적 이미지 (PNG, `export_figures.py`)
+
+| 파일 | 내용 |
+|---|---|
+| `pareto_curve.png` | 고정 α 곡선 + ★auto (정사각형) — 핵심 결과 한 장 |
+| `cumulative.png` | 누적 배출 baseline vs auto — 연간 절감량이 벌어지는 그림 |
+| `alpha_timeline.png` | 슬롯별 무릎점 α 1년 + 7일 이동평균 |
+| `daily_savings.png` | 일별 절감량 막대 |
+| `region_load.png` | 리전별 처리 job 수 전/후 |
 
 ## summary.json — run별 성적표
 
