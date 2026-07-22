@@ -47,12 +47,15 @@ def run_simulation():
     else:
         jobs = data_loader.load_jobs_csv(JOBS_CSV_PATH)
     sim_horizon = max(j["deadline"] for j in jobs) + 24
-    carbon_series = carbon_forecast.generate_master_series(int(sim_horizon) + 48)
+    # 탄소 회계는 실측 시계열로 해야 한다. 예측(LSTM)으로 판단하고 채점은 더미로 하면
+    # 판단 기준과 채점 기준이 어긋나 절감률이 음수로 나온다.
+    carbon_series, is_real = carbon_forecast.load_actual_series(int(sim_horizon) + 48)
     results = simulator.run_all_modes(
         jobs, carbon_series, modes=["carbon_lb_immediate", "carbon_lb_timeshift"]
     )
     st.session_state["results_by_mode"] = results
     st.session_state["carbon_series"] = carbon_series
+    st.session_state["carbon_is_real"] = is_real
     st.session_state["horizon_hours"] = sim_horizon
     st.session_state["n_jobs_run"] = len(jobs)
 

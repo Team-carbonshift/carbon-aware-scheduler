@@ -112,3 +112,48 @@ def coverage(df):
     """
     start, end = df["timestamp"].min(), df["timestamp"].max()
     return start, end, start + pd.Timedelta(hours=168)
+
+
+# 실제 탄소강도(실측) CSV — 배출량 회계의 정답값
+REAL_CARBON_CSV = os.path.join(
+    _REPO_ROOT, "carbon-forecast-LSTM", "data", "carbon_intensity_demo.csv")
+
+
+def load_actual_series(total_hours, carbon_csv=REAL_CARBON_CSV, base_time=BASE_TIME):
+    """시뮬레이션 **탄소 회계용** 실측 시계열 -> {표준리전코드: [시간별 값]}.
+
+    예측(get_forecast)이 아니라 "실제로 그 시각에 얼마나 배출됐는가"의 정답값이다.
+    스케줄링 판단은 예측으로 하되 채점은 이 실측값으로 해야 앞뒤가 맞는다.
+
+    실측 CSV가 없으면 None을 돌려준다(호출 측에서 더미로 폴백).
+    """
+    if not (carbon_csv and os.path.exists(carbon_csv)):
+        return None
+
+    df = pd.read_csv(carbon_csv, parse_dates=["timestamp"])
+    end = base_time + pd.Timedelta(hours=total_hours)
+    df = df[(df["timestamp"] >= base_time) & (df["timestamp"] < end)].copy()
+    if df.empty:
+        return None
+    df["region"] = df["region"].map(to_region)
+
+    series = {}
+    for region, grp in df.groupby("region"):
+        if region not in REGIONS:
+            continue
+        grp = grp.sort_values("timestamp")
+        hours = ((grp["timestamp"] - base_time).dt.total_seconds() / 3600).round().astype(int)
+        arr = [None] * total_hours
+        for h, v in zip(hours.values, grp["carbon_intensity"].values):
+            if 0 <= h < total_hours:
+                arr[h] = float(v)
+        # 빈 슬롯 forward-fill (자료 간격이 1시간보다 성길 때 대비)
+        last = next((v for v in arr if v is not None), 400.0)
+        for i in range(total_hours):
+            if arr[i] is None:
+                arr[i] = last
+            else:
+                last = arr[i]
+        series[region] = arr
+
+    return series if len(series) == len(REGIONS) else None
