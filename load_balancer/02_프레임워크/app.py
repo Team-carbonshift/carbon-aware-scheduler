@@ -74,18 +74,19 @@ with st.sidebar:
     st.title("🌍 탄소 인지 LB")
     st.caption("LSTM + ILP 라우팅 시뮬레이터 · 1년 실데이터 · Azure 8리전")
     if st.button("🔄 실험 다시 실행 (α 스윕)"):
-        with st.spinner("baseline + α 5개 실행 중… (~30초)"):
+        with st.spinner("1년치 전체 실행 중… (baseline + α 5개 + auto, 약 40분!)"):
             r = subprocess.run([sys.executable, str(BASE_DIR / "run_experiments.py")],
                                capture_output=True, text=True, cwd=BASE_DIR)
         st.code(r.stdout or r.stderr)
         st.cache_data.clear()
     st.divider()
     st.markdown(
-        "**현재 가정 (placeholder)**\n"
-        "- 탄소강도: 합성 데이터 (`gen_carbon.py`)\n"
-        "- 예측: perfect forecast (LSTM 자리)\n"
-        "- 용량: baseline 피크 × 1.2, headroom 0.8\n"
-        "- job 전력 1 kW 균일"
+        "**데이터·가정**\n"
+        "- 탄소강도: **실측** (lstm_eval의 y_true, 2025년 1년치)\n"
+        "- 라우팅 예측: **LSTM** (1시간 전 발행 y_pred, 사전 계산)\n"
+        "- 탄소 회계: 실측값 적분 (예측과 분리)\n"
+        "- 용량: baseline 피크 × 1.2, headroom 0.8 (가정)\n"
+        "- job 전력 1 kW 균일 (가정)"
     )
 
 if not (RESULTS_DIR / "summary.json").exists():
@@ -116,7 +117,7 @@ tab1, tab2, tab3 = st.tabs(["① 입력 데이터", "② 전 / 후 비교", "③
 # ═════════════════════ ① 입력 데이터 ═════════════════════
 with tab1:
     st.subheader("리전별 탄소강도 (실측, 1시간 해상도)")
-    st.caption("소스: 03_데이터/lstm_eval의 y_true. 1월 1~7일은 1월 8일 프로파일 반복.")
+    st.caption("소스: 01_데이터/lstm_eval의 y_true (실측). 1월 1~7일은 1월 8일 프로파일 반복.")
     fig = go.Figure()
     for r in REGIONS:
         fig.add_trace(go.Scatter(
@@ -272,9 +273,10 @@ with tab2:
             st.markdown(
                 "매 1시간 슬롯마다 다음 4단계를 반복합니다:\n\n"
                 "1. **재료 수집** — 그 시간에 제출된 job들 + 리전별 탄소강도. "
-                "탄소강도는 지금은 슬롯 시작 시점의 **실측값**을 그대로 사용합니다 "
-                "(perfect forecast placeholder — LSTM이 준비되면 '과거 24시간 → 다음 "
-                "1시간 예측'으로 이 부분만 교체. 즉 현재 성적은 예측 오차 0 가정의 상한선).\n"
+                "탄소강도는 **LSTM이 1시간 전에 발행한 예측값(y_pred)**을 사용합니다 — "
+                "즉 실시간 운영과 같은 조건(미래를 모름). 탄소 회계·성적 평가는 별도로 "
+                "**실측값(y_true)**으로 정산하므로 예측 오차의 비용이 결과에 정직하게 "
+                "반영됩니다.\n"
                 "2. **후보 곡선 그리기** — α 후보 11개(0, 0.1, …, 1)마다 ILP 배정을 "
                 "각각 계산해 (평균 지연, 예상 배출) 점 11개를 찍음. 이게 '이 시간의 "
                 "지연↔탄소 교환 곡선'.\n"
@@ -407,10 +409,10 @@ with tab2:
 # ═════════════════════ ③ α 스윕 · 모드 비교 ═════════════════════
 with tab3:
     st.subheader("파레토 곡선 — 사후 평가 (1년 집계)")
-    st.caption("run 하나가 점 하나 (x=평균 지연, y=총 탄소). **파란 곡선은 같은 7일을 "
+    st.caption("run 하나가 점 하나 (x=평균 지연, y=탄소 절감률). **파란 곡선은 같은 1년을 "
                "α만 바꿔 여러 번 재생해야 얻어지는 사후(hindsight) 기준선**이고, "
-               "auto는 매 시각 그 시점 정보만으로 실시간 달성한 값입니다. "
-               "실시간 관점의 그림(누적 배출·시간별 라우팅)은 ②탭에 있습니다.")
+               "auto는 매 시각 그 시점의 LSTM 예측만으로 실시간 달성한 값입니다. "
+               "실시간 관점의 그림(누적 배출·시간별 절감)은 ②탭에 있습니다.")
 
     if AUTO:
         st.success(

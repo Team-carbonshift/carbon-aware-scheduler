@@ -21,7 +21,7 @@ st.set_page_config(page_title="Carbon-Aware Scheduler", layout="wide",
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(_HERE)
-LB_DIR = os.path.join(REPO_ROOT, "load_balancer", "05_프레임워크")
+LB_DIR = os.path.join(REPO_ROOT, "load_balancer", "02_프레임워크")
 SCHED_DIR = os.path.join(REPO_ROOT, "scheduler")
 LSTM_DIR = os.path.join(REPO_ROOT, "carbon-forecast-LSTM")
 

@@ -3,8 +3,8 @@
 
 매 슬롯(기본 1시간)마다:
   1. 슬롯 내 제출된 job 수집 (출발지 = jobs.csv의 region)
-  2. 탄소강도 M̂ 확보 — 지금은 perfect forecast placeholder (실측값 사용).
-     ★ LSTM이 준비되면 CarbonSeries.forecast()만 교체하면 됨.
+  2. 탄소강도 M̂ 확보 — LSTM의 1시간 전 발행 예측(y_pred, 사전 계산)을 사용.
+     (CarbonSeries(use_lstm_pred=False)면 실측 기반 perfect forecast로 전환)
   3. 정규화: M̃ = M̂ / max_r M̂ (매 슬롯), l̃ = l / 244 (고정)
   4. ILP (PuLP/CBC): min Σ (α·M̃_r + (1-α)·l̃_or)·x  s.t. 용량(headroom)·전량처리(slack)
   5. 배정 확정 → job은 즉시 시작, duration 동안 해당 리전 용량 점유
