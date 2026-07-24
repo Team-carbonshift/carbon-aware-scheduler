@@ -1,0 +1,20 @@
+# Azure inter-region round-trip latency (ms), symmetric (bidirectional average),,,,,,,
+# Source: Azure network round-trip latency statistics (Microsoft Learn),,,,,,,,
+# Region mapping (per official Microsoft region location documentation):,,,,,,,,
+#   US_West    = West US (California) -- ACTUAL: region physically located in California,,,,,,,,
+#   US_Central = South Central US (San Antonio Texas) -- ACTUAL: region physically located in Texas,,,,,,,,
+#   US_East    = East US (Virginia) -- APPROXIMATION: no Azure region exists in New York; nearest region (Virginia ~500km away) used as proxy. Real NY values would be ~5-8ms higher.,,,,,,,,
+#   France     = France Central (Paris) -- ACTUAL,,,,,,,,
+#   Germany    = Germany West Central (Frankfurt) -- ACTUAL,,,,,,,,
+#   Korea      = Korea Central (Seoul) -- ACTUAL,,,,,,,,
+#   India      = Central India (Pune) -- ACTUAL,,,,,,,,
+#   Japan      = Japan East (Tokyo) -- ACTUAL,,,,,,,,
+,US_West(Ä¶¸®Æ÷´Ï¾Æ),US_Central(ÅØ»ç½º),US_East(´º¿å),France,Germany,Korea,India,Japan
+US_West(Ä¶¸®Æ÷´Ï¾Æ),0,39,74,146,153,134,225,109
+US_Central(ÅØ»ç½º),39,0,38,113,125,153,244,128
+US_East(´º¿å),74,38,0,90,95,193,204,172
+France,146,113,90,0,12,238,137,228
+Germany,153,125,95,12,0,244,142,235
+Korea,134,153,193,238,244,0,122,30
+India,225,244,204,137,142,122,0,126
+Japan,109,128,172,228,235,30,126,0

@@ -43,6 +43,6 @@ streamlit run interface/app.py
 개별 실행도 그대로 가능합니다.
 
 ```bash
-streamlit run load_balancer/05_프레임워크/app.py   # 로드밸런서만
+streamlit run load_balancer/02_프레임워크/app.py   # 로드밸런서만
 streamlit run scheduler/scheduler/gui.py          # 스케줄러만
 ```
