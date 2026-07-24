@@ -24,10 +24,25 @@ from scheduler.config import MODES, ZONE_LABELS, ZONE_TO_ISO3
 
 st.set_page_config(page_title="탄소 인식 스케줄러", layout="wide", initial_sidebar_state="expanded")
 
-JOB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "job")
+_SCHED_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(_SCHED_ROOT)
+
+JOB_DIR = os.path.join(_SCHED_ROOT, "data", "job")
 ROUTED_CSV_PATH = os.path.join(JOB_DIR, "jobs_routed_alpha_auto.csv")
 JOBS_CSV_PATH = os.path.join(JOB_DIR, "jobs.csv")
+
+# 2025년 1년치: 로드밸런서와 같은 job 목록 + 같은 배정 결과를 그대로 사용
+YEAR_JOBS_CSV = os.path.join(_REPO_ROOT, "load_balancer", "01_데이터", "jobs.csv")
+YEAR_ASSIGN_CSV = os.path.join(_REPO_ROOT, "load_balancer", "02_프레임워크",
+                               "results", "assign_alpha_auto.csv")
+USING_YEAR = os.path.exists(YEAR_JOBS_CSV) and os.path.exists(YEAR_ASSIGN_CSV)
 USING_ROUTED = os.path.exists(ROUTED_CSV_PATH)
+
+# 시뮬레이션 t=0 이 가리키는 실제 시각 — 모두 UTC(협정 세계시) 기준.
+# 2025년 1년치: 로드밸런서·LSTM eval_records와 동일한 축.
+YEAR_BASE_TIME = pd.Timestamp("2025-01-01 00:00:00")
+# 7일치 폴백: jobs.csv 생성 규약(README_jobs.md)의 t=0.
+WEEK_BASE_TIME = pd.Timestamp("2026-01-01 00:00:00")
 
 COLOR_SHIFT = "#2e7d32"       # 실행 구간(초록)
 COLOR_WAIT = "#c9c9c9"        # 요청~실행 대기(점선 회색)
@@ -41,11 +56,18 @@ CENTROIDS = {
 }
 
 
-def run_simulation():
+def load_jobs():
+    """2025년 1년치(로드밸런서와 동일 데이터)를 우선 사용."""
+    if USING_YEAR:
+        return data_loader.load_jobs_with_assignment(YEAR_JOBS_CSV, YEAR_ASSIGN_CSV), "year"
     if USING_ROUTED:
-        jobs = data_loader.load_routed_jobs_csv(ROUTED_CSV_PATH)
-    else:
-        jobs = data_loader.load_jobs_csv(JOBS_CSV_PATH)
+        return data_loader.load_routed_jobs_csv(ROUTED_CSV_PATH), "week"
+    return data_loader.load_jobs_csv(JOBS_CSV_PATH), "week"
+
+
+def run_simulation():
+    jobs, scope = load_jobs()
+    st.session_state["data_scope"] = scope
     sim_horizon = max(j["deadline"] for j in jobs) + 24
     # 탄소 회계는 실측 시계열로 해야 한다. 예측(LSTM)으로 판단하고 채점은 더미로 하면
     # 판단 기준과 채점 기준이 어긋나 절감률이 음수로 나온다.
@@ -73,14 +95,30 @@ def country_job_counts(jobs_at_t):
     return counts
 
 
+def sim_base():
+    """시뮬레이션 t=0 에 대응하는 실제 시각 (UTC).
+
+    2025년 1년치는 로드밸런서·LSTM과 같은 2025-01-01 00:00 UTC 기준,
+    7일치 폴백 데이터는 job 생성 규약대로 2026-01-01 00:00 UTC 기준.
+    """
+    if st.session_state.get("data_scope") == "year":
+        return YEAR_BASE_TIME
+    return WEEK_BASE_TIME
+
+
+def to_utc(h):
+    """시뮬레이션 시각(시간 단위) -> 실제 UTC datetime."""
+    return sim_base() + pd.Timedelta(hours=float(h))
+
+
 def fmt_dt(h):
-    d = int(h // 24) + 1
-    rem = h - int(h // 24) * 24
-    hh = int(rem)
-    mm = int(round((rem - hh) * 60))
-    if mm == 60:
-        hh, mm = hh + 1, 0
-    return f"Day {d} {hh:02d}:{mm:02d}"
+    """시뮬레이션 시각 -> 'YYYY-MM-DD HH:MM' (UTC)."""
+    return to_utc(h).strftime("%Y-%m-%d %H:%M")
+
+
+def fmt_date(h):
+    """시뮬레이션 시각 -> 'YYYY-MM-DD' (UTC)."""
+    return to_utc(h).strftime("%Y-%m-%d")
 
 
 def draw_map(counts, color):
@@ -152,7 +190,7 @@ def draw_timeline(jobs_at_t, t, day_start):
         yaxis=dict(autorange="reversed", title=None), plot_bgcolor="white",
     )
     fig.update_xaxes(range=[0, 24], tickvals=list(range(0, 25, 3)),
-                     title="시각 (시)", gridcolor="#eee")
+                     title="시각 (시, UTC)", gridcolor="#eee")
     return fig
 
 
@@ -196,10 +234,22 @@ def jobs_table(jobs_at_t, t, imm_by_id):
 
 
 # ─────────────────────── 사이드바 ───────────────────────
+# 페이지에 들어오면 (로드밸런서처럼) 자동으로 1년치 시뮬레이션이 준비되어 있게 한다.
+if st.session_state.get("results_by_mode") is None:
+    with st.spinner("2025년 1년치 시뮬레이션 실행 중… (최초 1회)"):
+        run_simulation()
+    st.session_state["playing"] = False
+
 with st.sidebar:
     st.header("시뮬레이션 설정")
 
-    if st.button("시뮬레이션 실행", type="primary", width="stretch"):
+    scope = st.session_state.get("data_scope")
+    n_jobs = st.session_state.get("n_jobs_run", 0)
+    days = int(st.session_state.get("horizon_hours", 0)) // 24
+    st.caption(f"{'2025년 1년치' if scope == 'year' else '7일치'} · job {n_jobs:,}개 · {days}일")
+    st.caption(carbon_forecast.backend_info())
+
+    if st.button("다시 실행", width="stretch"):
         with st.spinner("실행 중..."):
             run_simulation()
         st.session_state["playing"] = False
@@ -224,13 +274,22 @@ with st.sidebar:
         st.session_state["ui_day"] = nxt // 24 + 1
         st.session_state["ui_hour"] = nxt % 24
 
-    st.subheader("시점 선택")
-    day = st.number_input("일자 (Day)", min_value=1, max_value=max_day, step=1,
-                          key="ui_day", disabled=not has_results)
-    hour = st.number_input("시각 (시)", min_value=0, max_value=23, step=1,
+    st.subheader("시점 선택 (UTC)")
+    base_date = sim_base().date()
+    min_date = base_date
+    max_date = (sim_base() + pd.Timedelta(hours=max_t)).date()
+
+    picked = st.date_input("날짜 (UTC)", value=base_date + pd.Timedelta(
+        days=int(st.session_state["ui_day"]) - 1).to_pytimedelta(),
+        min_value=min_date, max_value=max_date, disabled=not has_results)
+    # 날짜 위젯 값 -> ui_day 로 되돌려 자동재생과 상태를 공유
+    st.session_state["ui_day"] = (pd.Timestamp(picked).date() - base_date).days + 1
+
+    hour = st.number_input("시각 (시, UTC)", min_value=0, max_value=23, step=1,
                            key="ui_hour", disabled=not has_results)
+    day = st.session_state["ui_day"]
     t_now = (int(day) - 1) * 24 + int(hour)
-    st.metric("선택 시각", f"Day {int(day)} · {int(hour):02d}:00")
+    st.metric("선택 시각 (UTC)", to_utc(t_now).strftime("%Y-%m-%d %H:%M"))
 
     play_col, stop_col = st.columns(2)
     if play_col.button("▶ 자동 재생", width="stretch", disabled=not has_results):
@@ -247,7 +306,7 @@ st.title("탄소 인식 time-shift 스케줄러")
 
 results_by_mode = st.session_state.get("results_by_mode")
 if results_by_mode is None:
-    st.info("왼쪽에서 '시뮬레이션 실행'을 눌러주세요.")
+    st.error("시뮬레이션 결과를 만들지 못했습니다. 왼쪽의 '다시 실행'을 눌러주세요.")
     st.stop()
 
 immediate = results_by_mode["carbon_lb_immediate"]
@@ -273,7 +332,8 @@ m1, m2, m3, m4 = st.columns(4)
 m1.metric("이 시점까지 누적 절감", f"{saved_now:,.0f} gCO₂", f"{saved_now_pct:.1f}%")
 m2.metric("실행 중 job (즉시)", f"{len(imm_running)}개", f"{len(imm_counts)}개국")
 m3.metric("실행 중 job (ours)", f"{len(shift_running)}개", f"{len(shift_counts)}개국")
-m4.metric("전체 절감 (7일)", f"{overall_pct:.1f}%", f"평균 지연 {avg_delay:.1f}h")
+_period = "1년" if st.session_state.get("data_scope") == "year" else "7일"
+m4.metric(f"전체 절감 ({_period})", f"{overall_pct:.1f}%", f"평균 지연 {avg_delay:.1f}h")
 
 # 지도 2개 (나라 위 숫자 = 그 나라에서 실행 중인 job 수)
 c_left, c_right = st.columns(2)
@@ -292,7 +352,7 @@ tbl = jobs_table(shift_running, t_now, imm_by_id)
 bar_max = float(tbl["절감(gCO₂)"].max()) if not tbl.empty and tbl["절감(gCO₂)"].max() > 0 else 1.0
 day_start = (int(day) - 1) * 24
 
-st.markdown(f"#### Day {int(day)} {int(hour):02d}:00 실행 중 job — "
+st.markdown(f"#### {to_utc(t_now).strftime('%Y-%m-%d %H:%M')} UTC 실행 중 job — "
             f"{len(tbl)}개 · 실제 배출 {tbl['time-shift(gCO₂)'].sum():,.0f} · "
             f"time-shift 절감 {tbl['절감(gCO₂)'].sum():,.0f} gCO₂")
 st.dataframe(
@@ -308,7 +368,8 @@ st.dataframe(
     },
 )
 
-st.caption("아래 타임라인 — ◆ 요청 · · · 대기 ── 실행(초록) · 빨강선 = 현재 시각 (그 날 0~24시)")
+st.caption(f"아래 타임라인 — ◆ 요청 · · · 대기 ── 실행(초록) · 빨강선 = 현재 시각 "
+           f"({fmt_date(t_now)} 00~24시 UTC)")
 st.plotly_chart(draw_timeline(shift_running, t_now, day_start),
                 width="stretch", config={"displayModeBar": False}, key="timeline")
 
